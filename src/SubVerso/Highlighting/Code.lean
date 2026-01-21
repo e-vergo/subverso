@@ -944,20 +944,23 @@ def emitToken (blame : Syntax) (info : SourceInfo) (token : Token) : HighlightM 
       fillMissingSourceUpTo pos
   let text ← getFileMap
 
-  let .original leading pos trailing endPos := info
-    | match info with
-      | .synthetic b e =>
-        let str := Compat.String.Pos.extract text.source b e
-        throwError "Syntax {blame} not original, can't highlight: '{str}'"
-      | _ => throwError "Syntax {blame} not original, can't highlight: {repr info}"
-
-  emitString' leading.toString
-  openUntil <| text.toPosition pos
-  modify fun st => {st with output := Output.addToken st.output token}
-  closeUntil endPos
-  emitString' trailing.toString
-  let trailingPos := Internal.getTrailingOrTailPos? blame
-  setLastPos trailingPos
+  match info with
+  | .original leading pos trailing endPos =>
+    emitString' leading.toString
+    openUntil <| text.toPosition pos
+    modify fun st => {st with output := Output.addToken st.output token}
+    closeUntil endPos
+    emitString' trailing.toString
+    let trailingPos := Internal.getTrailingOrTailPos? blame
+    setLastPos trailingPos
+  | .synthetic b e _ =>
+    -- Handle synthetic source info (e.g., from macros or term-mode proofs)
+    -- No leading/trailing whitespace available, just emit the token at the position
+    openUntil <| text.toPosition b
+    modify fun st => {st with output := Output.addToken st.output token}
+    closeUntil e
+    setLastPos (some e)
+  | _ => throwError "Syntax {blame} has no position info, can't highlight: {repr info}"
 
 def emitToken' (token : Token) : HighlightM Unit := do
   modify fun st => {st with output := Output.addToken st.output token}
