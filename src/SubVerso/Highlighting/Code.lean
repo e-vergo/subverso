@@ -453,16 +453,19 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
       let doc ← findDocString? env name
       kind := .const name tyStr doc false
     else
-      -- Try resolving with namespaces from the environment
-      -- Check all registered namespaces
-      let namespaces := (Lean.namespacesExt.getState env).toList
-      for ns in namespaces do
-        let qualName := ns ++ name
-        if let some ci := env.find? qualName then
-          let tyStr := toString ci.type
-          let doc ← findDocString? env qualName
-          kind := .const qualName tyStr doc false
-          break
+      -- Try to find a constant whose name ends with the identifier
+      -- Extract the string component for suffix matching
+      if let .str _ s := name then
+        -- Search through all constants using the fold on ConstantMap
+        let found := env.constants.fold (init := none) fun acc n _ =>
+          match acc with
+          | some _ => acc
+          | none => if let .str _ s' := n then (if s == s' then some n else none) else none
+        if let some fullName := found then
+          if let some ci := env.find? fullName then
+            let tyStr := toString ci.type
+            let doc ← findDocString? env fullName
+            kind := .const fullName tyStr doc false
   pure kind
 
 def anonCtorKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
