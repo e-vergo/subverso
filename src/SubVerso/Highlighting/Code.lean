@@ -401,11 +401,20 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
     (allowUnknownTyped : Bool := false) :
     ReaderT Context m Token.Kind := do
   let mut kind : Token.Kind := .unknown
+  -- First try exact syntax match
   for t in trees do
     for (ci, info) in infoForSyntax t stx do
       if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
         if seen.priority > kind.priority then kind := seen
       else continue
+  -- If no info found, try broader search for enclosing info nodes
+  -- This helps find TermInfo for identifiers inside tactic arguments
+  if kind == .unknown then
+    for t in trees do
+      for (ci, info) in infoIncludingSyntax t stx do
+        if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
+          if seen.priority > kind.priority then kind := seen
+        else continue
   pure kind
 
 def anonCtorKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
