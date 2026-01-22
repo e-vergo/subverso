@@ -396,14 +396,22 @@ def infoKind [Monad m] [MonadLiftT IO m] [MonadMCtx m] [MonadEnv m] [MonadFileMa
     | _ =>
       pure none
 
+-- Check if name matches (either exact or by suffix for qualified names)
+private def nameMatches (fullName : Name) (queryName : Name) : Bool :=
+  fullName == queryName ||
+  -- Check if fullName ends with queryName (e.g., `Foo.Bar.baz` matches `baz`)
+  match fullName with
+  | .str parent s => queryName == .str .anonymous s || nameMatches parent queryName
+  | _ => false
+
 -- Find TermInfo by matching identifier name, searching the entire tree
 def findTermInfoByName (t : InfoTree) (name : Name) : List (ContextInfo × TermInfo) :=
   t.collectNodesBottomUp fun ci info _ soFar =>
     match info with
     | .ofTermInfo ti =>
       match ti.expr with
-      | .const n _ => if n == name then (ci, ti) :: soFar else soFar
-      | .fvar fv => if fv.name == name then (ci, ti) :: soFar else soFar
+      | .const n _ => if nameMatches n name then (ci, ti) :: soFar else soFar
+      | .fvar fv => if nameMatches fv.name name then (ci, ti) :: soFar else soFar
       | _ => soFar
     | _ => soFar
 
