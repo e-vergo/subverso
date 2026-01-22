@@ -396,6 +396,17 @@ def infoKind [Monad m] [MonadLiftT IO m] [MonadMCtx m] [MonadEnv m] [MonadFileMa
     | _ =>
       pure none
 
+-- Find TermInfo by matching identifier name, searching the entire tree
+def findTermInfoByName (t : InfoTree) (name : Name) : List (ContextInfo × TermInfo) :=
+  t.collectNodesBottomUp fun ci info _ soFar =>
+    match info with
+    | .ofTermInfo ti =>
+      match ti.expr with
+      | .const n _ => if n == name then (ci, ti) :: soFar else soFar
+      | .fvar fv => if fv.name == name then (ci, ti) :: soFar else soFar
+      | _ => soFar
+    | _ => soFar
+
 def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
     (trees : Array InfoTree) (stx : TSyntax `ident)
     (allowUnknownTyped : Bool := false) :
@@ -415,6 +426,14 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
         if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
           if seen.priority > kind.priority then kind := seen
         else continue
+  -- Last resort: search for TermInfo by identifier name
+  -- This handles cases where position matching fails (e.g., macro expansion in tactics)
+  if kind == .unknown then
+    let name := stx.getId
+    for t in trees do
+      for (ci, ti) in findTermInfoByName t name do
+        if let some seen ← termInfoKind ci ti (allowUnknownTyped := allowUnknownTyped) then
+          if seen.priority > kind.priority then kind := seen
   pure kind
 
 def anonCtorKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
