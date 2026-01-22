@@ -442,6 +442,20 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
       for (ci, ti) in findTermInfoByName t name do
         if let some seen ← termInfoKind ci ti (allowUnknownTyped := allowUnknownTyped) then
           if seen.priority > kind.priority then kind := seen
+  -- Final fallback: look up identifier in environment
+  -- This handles simp lemma arguments and other raw name references where no TermInfo exists
+  if kind == .unknown then
+    let name := stx.getId
+    let env ← getEnv
+    -- Try to resolve the name - it might be unqualified
+    let candidates := env.constants.fold (init := #[]) fun acc n _ =>
+      if nameMatches n name then acc.push n else acc
+    if let some fullName := candidates[0]? then
+      -- Found a matching constant - return const kind with type info
+      if let some ci := env.find? fullName then
+        let tyStr := toString ci.type
+        let doc ← findDocString? env fullName
+        kind := .const fullName tyStr doc false
   pure kind
 
 def anonCtorKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
