@@ -447,15 +447,22 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
   if kind == .unknown then
     let name := stx.getId
     let env ← getEnv
-    -- Try to resolve the name - it might be unqualified
-    let candidates := env.constants.fold (init := #[]) fun acc n _ =>
-      if nameMatches n name then acc.push n else acc
-    if let some fullName := candidates[0]? then
-      -- Found a matching constant - return const kind with type info
-      if let some ci := env.find? fullName then
-        let tyStr := toString ci.type
-        let doc ← findDocString? env fullName
-        kind := .const fullName tyStr doc false
+    -- First try direct lookup with the exact name
+    if let some ci := env.find? name then
+      let tyStr := toString ci.type
+      let doc ← findDocString? env name
+      kind := .const name tyStr doc false
+    else
+      -- Try resolving with namespaces from the environment
+      -- Check all registered namespaces
+      let namespaces := (Lean.namespacesExt.getState env).toList
+      for ns in namespaces do
+        let qualName := ns ++ name
+        if let some ci := env.find? qualName then
+          let tyStr := toString ci.type
+          let doc ← findDocString? env qualName
+          kind := .const qualName tyStr doc false
+          break
   pure kind
 
 def anonCtorKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMCtx m] [Alternative m]
