@@ -420,9 +420,11 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
     (allowUnknownTyped : Bool := false) :
     ReaderT Context m Token.Kind := do
   let mut kind : Token.Kind := .unknown
+  let mut ctxInfo? : Option ContextInfo := none  -- Capture a ContextInfo for fallback pretty-printing
   -- First try exact syntax match
   for t in trees do
     for (ci, info) in infoForSyntax t stx do
+      if ctxInfo?.isNone then ctxInfo? := some ci  -- Capture first ContextInfo
       if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
         if seen.priority > kind.priority then kind := seen
       else continue
@@ -431,6 +433,7 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
   if kind == .unknown then
     for t in trees do
       for (ci, info) in infoIncludingSyntax t stx do
+        if ctxInfo?.isNone then ctxInfo? := some ci
         if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
           if seen.priority > kind.priority then kind := seen
         else continue
@@ -440,6 +443,7 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
     let name := stx.getId
     for t in trees do
       for (ci, ti) in findTermInfoByName t name do
+        if ctxInfo?.isNone then ctxInfo? := some ci
         if let some seen ← termInfoKind ci ti (allowUnknownTyped := allowUnknownTyped) then
           if seen.priority > kind.priority then kind := seen
   -- Final fallback: look up identifier in environment
@@ -447,9 +451,21 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
   if kind == .unknown then
     let name := stx.getId.eraseMacroScopes  -- Erase macro scopes for matching
     let env ← getEnv
+    -- Helper to pretty-print signature using captured context
+    let ppSig (constName : Name) : m String := do
+      if let some ci := ctxInfo? then
+        -- Use captured ContextInfo to run MetaM for proper pretty-printing
+        let sig ← ci.runMetaM {} (PrettyPrinter.ppSignature constName)
+        return toString sig.fmt
+      else
+        -- Fallback to raw type if no context available
+        if let some constInfo := env.find? constName then
+          return toString constInfo.type
+        else
+          return ""
     -- First try direct lookup with the exact name
-    if let some ci := env.find? name then
-      let tyStr := toString ci.type
+    if env.find? name |>.isSome then
+      let tyStr ← ppSig name
       let doc ← findDocString? env name
       kind := .const name tyStr doc false
     else
@@ -462,8 +478,8 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
           | some _ => acc
           | none => if let .str _ s' := n then (if s == s' then some n else none) else none
         if let some fullName := found then
-          if let some ci := env.find? fullName then
-            let tyStr := toString ci.type
+          if env.find? fullName |>.isSome then
+            let tyStr ← ppSig fullName
             let doc ← findDocString? env fullName
             kind := .const fullName tyStr doc false
   pure kind
