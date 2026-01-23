@@ -445,7 +445,7 @@ def identKind [Monad m] [MonadLiftT IO m] [MonadFileMap m] [MonadEnv m] [MonadMC
   -- Final fallback: look up identifier in environment
   -- This handles simp lemma arguments and other raw name references where no TermInfo exists
   if kind == .unknown then
-    let name := stx.getId
+    let name := stx.getId.eraseMacroScopes  -- Erase macro scopes for matching
     let env ← getEnv
     -- First try direct lookup with the exact name
     if let some ci := env.find? name then
