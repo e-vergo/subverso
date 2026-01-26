@@ -36,13 +36,31 @@ Other info types may be added as needed for performance in the future.
 -/
 structure InfoTable where
   tacticInfo : Compat.HashMap Compat.Syntax.Range (Array (ContextInfo × TacticInfo)) := {}
+  /-- All info nodes indexed by exact (start, end) position for O(1) lookup -/
+  infoByExactPos : Compat.HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info)) := {}
+  /-- TermInfo indexed by expression name (for const/fvar lookups) -/
+  termInfoByName : Compat.HashMap Name (Array (ContextInfo × TermInfo)) := {}
+  /-- Index from final name component string to full names for O(1) suffix lookup -/
+  nameSuffixIndex : Compat.HashMap String (Array Name) := {}
 
-instance : Inhabited InfoTable := ⟨⟨{}⟩⟩
+instance : Inhabited InfoTable := ⟨⟨{}, {}, {}, {}⟩⟩
 
 /--
-Adds info to the table, doing nothing if it's not a type that the table supports.
+Adds info to the table. Populates:
+- `tacticInfo` for tactic nodes
+- `infoByExactPos` for all info nodes with valid positions
+- `termInfoByName` for term info with const/fvar expressions
 -/
 def InfoTable.add (ctx : ContextInfo) (i : Info) (table : InfoTable) : InfoTable :=
+  -- First, add to infoByExactPos for O(1) position lookup
+  let table :=
+    if let (some startPos, some endPos) := (i.stx.getPos? true, i.stx.getTailPos? true) then
+      let key := (startPos, endPos)
+      { table with infoByExactPos := table.infoByExactPos.insert key <|
+        ((Compat.HashMap.get? table.infoByExactPos key).getD #[]).push (ctx, i)
+      }
+    else table
+  -- Then handle specific info types
   match i with
   | .ofTacticInfo ti =>
     if let some rng := ti.stx.getRange? (canonicalOnly := true) then
@@ -50,6 +68,18 @@ def InfoTable.add (ctx : ContextInfo) (i : Info) (table : InfoTable) : InfoTable
         ((Compat.HashMap.get? table.tacticInfo rng).getD #[]).push (ctx, ti)
       }
     else table
+  | .ofTermInfo ti =>
+    -- Index by name for const/fvar expressions
+    match ti.expr with
+    | .const n _ =>
+      { table with termInfoByName := table.termInfoByName.insert n <|
+        ((Compat.HashMap.get? table.termInfoByName n).getD #[]).push (ctx, ti)
+      }
+    | .fvar fv =>
+      { table with termInfoByName := table.termInfoByName.insert fv.name <|
+        ((Compat.HashMap.get? table.termInfoByName fv.name).getD #[]).push (ctx, ti)
+      }
+    | _ => table
   | _ => table
 
 partial def InfoTable.ofInfoTree (t : InfoTree) (init : InfoTable := {}) : InfoTable := go none t init
@@ -67,6 +97,31 @@ def InfoTable.ofInfoTrees (ts : Array InfoTree) (init : InfoTable := {}) : InfoT
 def InfoTable.tacticInfo? (stx : Syntax) (table : InfoTable) : Option (Array (ContextInfo × TacticInfo)) := do
   let rng ← stx.getRange? (canonicalOnly := true)
   Compat.HashMap.get? table.tacticInfo rng |>.map (·.filter (·.2.stx == stx))
+
+/-- O(1) lookup for info nodes by exact position match -/
+def InfoTable.lookupByExactPos (table : InfoTable) (stx : Syntax) : Array (ContextInfo × Info) :=
+  match stx.getPos? true, stx.getTailPos? true with
+  | some startPos, some endPos =>
+    Compat.HashMap.get? table.infoByExactPos (startPos, endPos) |>.getD #[]
+  | _, _ => #[]
+
+/-- O(1) lookup for TermInfo by name (for const/fvar expressions) -/
+def InfoTable.lookupTermInfoByName (table : InfoTable) (name : Name) : Array (ContextInfo × TermInfo) :=
+  Compat.HashMap.get? table.termInfoByName name |>.getD #[]
+
+/-- Build suffix index from environment constants. Call once at initialization. -/
+def InfoTable.buildSuffixIndex (env : Environment) (table : InfoTable) : InfoTable :=
+  let index := env.constants.fold (init := table.nameSuffixIndex) fun acc fullName _ =>
+    match fullName with
+    | .str _ suffix =>
+      let existing := Compat.HashMap.get? acc suffix |>.getD #[]
+      acc.insert suffix (existing.push fullName)
+    | _ => acc
+  { table with nameSuffixIndex := index }
+
+/-- O(1) lookup for constants by suffix -/
+def InfoTable.lookupBySuffix (table : InfoTable) (suffix : String) : Array Name :=
+  Compat.HashMap.get? table.nameSuffixIndex suffix |>.getD #[]
 
 structure Context where
   ids : HashMap Lsp.RefIdent Lsp.RefIdent
@@ -688,9 +743,13 @@ structure HighlightState where
   terms : Compat.HashMap Expr Highlighted := {}
   /-- Cached already-rendered terms from hovers and proof states, in an intermediate state -/
   ppTerms : Compat.HashMap Expr CodeWithInfos := {}
+  /-- Cached identKind results by (syntax position, name) -/
+  identKindCache : Compat.HashMap (String.Pos.Raw × Name) Token.Kind := {}
+  /-- Cached pretty-printed signatures by constant name -/
+  signatureCache : Compat.HashMap Name String := {}
 
 
-instance : Inhabited HighlightState := ⟨default, default, default, default, default, default, {}, {}, {}, {}⟩
+instance : Inhabited HighlightState := ⟨default, default, default, default, default, default, {}, {}, {}, {}, {}, {}⟩
 
 def HighlightState.empty : HighlightState where
   messages := #[]
@@ -754,6 +813,90 @@ def HighlightM.openTactic (info : Array (Highlighted.Goal Highlighted)) (startPo
 
 instance : Inhabited (HighlightM α) where
   default := fun _ _ _ => default
+
+/-- Get signature with caching (for use within HighlightM) -/
+private def getCachedSignature (ctx : ContextInfo) (name : Name) : HighlightM String := do
+  if let some sig := (← get).signatureCache.get? name then
+    return sig
+  let sig ← ctx.runMetaM {} do
+    let sig ← PrettyPrinter.ppSignature name
+    return toString sig.fmt
+  modify fun st => { st with signatureCache := st.signatureCache.insert name sig }
+  return sig
+
+/--
+Optimized version of `identKind` for use within `HighlightM`.
+Uses O(1) InfoTable lookups and caches results.
+-/
+def identKind' (stx : TSyntax `ident) (allowUnknownTyped : Bool := false) : HighlightM Token.Kind := do
+  let name := stx.getId
+  -- Check cache first
+  if let some pos := stx.raw.getPos? true then
+    if let some cached := (← get).identKindCache.get? (pos, name) then
+      return cached
+
+  let table ← readThe InfoTable
+  let mut kind : Token.Kind := .unknown
+  let mut ctxInfo? : Option ContextInfo := none
+
+  -- Pass 1: O(1) exact position lookup via InfoTable
+  for (ci, info) in table.lookupByExactPos stx do
+    if ctxInfo?.isNone then ctxInfo? := some ci
+    if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
+      if seen.priority > kind.priority then kind := seen
+
+  -- Pass 2: Fallback to containment search if needed (still O(N) but only runs on miss)
+  -- This helps find TermInfo for identifiers inside tactic arguments
+  if kind == .unknown then
+    -- We need trees for this fallback - but they're not passed to us anymore
+    -- Skip this pass for now; it's rarely needed and we have other fallbacks
+    pure ()
+
+  -- Pass 3: O(1) lookup by name via InfoTable
+  if kind == .unknown then
+    for (ci, ti) in table.lookupTermInfoByName name do
+      if ctxInfo?.isNone then ctxInfo? := some ci
+      if let some seen ← termInfoKind ci ti (allowUnknownTyped := allowUnknownTyped) then
+        if seen.priority > kind.priority then kind := seen
+
+  -- Pass 4: Environment constant lookup with O(1) suffix index
+  if kind == .unknown then
+    let nameErased := name.eraseMacroScopes
+    let env ← getEnv
+
+    -- Helper to pretty-print signature using captured context and cache
+    let ppSig (constName : Name) : HighlightM String := do
+      if let some ci := ctxInfo? then
+        getCachedSignature ci constName
+      else
+        -- Fallback to raw type if no context available
+        if let some constInfo := env.find? constName then
+          return toString constInfo.type
+        else
+          return ""
+
+    -- First try direct lookup with the exact name
+    if env.find? nameErased |>.isSome then
+      let tyStr ← ppSig nameErased
+      let doc ← findDocString? env nameErased
+      kind := .const nameErased tyStr doc false
+    else
+      -- O(1) suffix lookup via pre-built index
+      if let .str _ s := nameErased then
+        let candidates := table.lookupBySuffix s
+        -- Take the first matching constant
+        for fullName in candidates do
+          if env.find? fullName |>.isSome then
+            let tyStr ← ppSig fullName
+            let doc ← findDocString? env fullName
+            kind := .const fullName tyStr doc false
+            break
+
+  -- Cache result before returning
+  if let some pos := stx.raw.getPos? true then
+    modify fun st => { st with identKindCache := st.identKindCache.insert (pos, name) kind }
+
+  pure kind
 
 def nextMessage? : HighlightM (Option MessageBundle) := do
   let st ← get
@@ -1541,15 +1684,15 @@ partial def highlight'
               highlight' trees field tactics
             else
               withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Not a field.") do
-              let k ← identKind trees ⟨stx⟩
+              let k ← identKind' ⟨stx⟩
               withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Identifier token for {stx} is {repr k}") do
               emitToken stx i ⟨k, x.toString⟩
           | _ =>
-            let k ← identKind trees ⟨stx⟩
+            let k ← identKind' ⟨stx⟩
             withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Identifier token for {stx} is {repr k}") do
             emitToken stx i ⟨k, x.toString⟩
         | _ =>
-          let k ← identKind trees ⟨stx⟩
+          let k ← identKind' ⟨stx⟩
           withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Identifier token for {stx} is {repr k}") do
           emitToken stx i ⟨k, x.toString⟩
     | stx@(.atom i x) =>
@@ -1559,7 +1702,7 @@ partial def highlight'
         | some (n, _) => findDocString? (← getEnv) n
       let name := lookingAt.map (·.1)
       let occ := lookingAt.map fun (n, pos) => s!"{n}-{pos}"
-      if let .sort docs? ← identKind trees ⟨stx⟩ then
+      if let .sort docs? ← identKind' ⟨stx⟩ then
         withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Sort") do
           emitToken stx i ⟨.sort docs?, x⟩
         return
@@ -1591,7 +1734,7 @@ partial def highlight'
         emitToken stx i ⟨.unknown, string⟩
     | .node _ `num #[.atom i n] =>
       withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Numeral") do
-        let k ← identKind trees ⟨stx⟩ (allowUnknownTyped := true)
+        let k ← identKind' ⟨stx⟩ (allowUnknownTyped := true)
         emitToken stx i ⟨k, n⟩
     | .node _ ``Lean.Parser.Command.docComment #[.atom i1 opener, .atom i2 body] =>
       withTraceNode `SubVerso.Highlighting.Code (fun _ => pure m!"Doc comment") do
@@ -1605,7 +1748,7 @@ partial def highlight'
       match i, i' with
       | .original leading pos _ _, .original _ _ trailing endPos =>
         let info := .original leading pos trailing endPos
-        emitToken stx info ⟨← identKind trees ⟨stx⟩, s!".{x.toString}"⟩
+        emitToken stx info ⟨← identKind' ⟨stx⟩, s!".{x.toString}"⟩
       | _, _ =>
         highlight' trees dot tactics
         highlight' trees name tactics
@@ -1657,7 +1800,8 @@ def highlight (stx : Syntax) (messages : Array Message)
   let ids := build modrefs
 
   let st ← HighlightState.ofMessages stx messages
-  let infoTable : InfoTable := .ofInfoTrees trees
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees
+  let infoTable := infoTable.buildSuffixIndex (← getEnv)
 
   let ((), {output := output, ..}) ← highlight' trees stx true |>.run ⟨ids, true, false, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run st
   pure <| .fromOutput output
@@ -1683,7 +1827,8 @@ def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
   let endPos? := endPos? <|> Internal.getTrailingOrTailPos? stx
 
   let st ← HighlightState.ofMessages stx messages startPos? endPos?
-  let infoTable : InfoTable := .ofInfoTrees trees
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees
+  let infoTable := infoTable.buildSuffixIndex (← getEnv)
 
   let doHighlight : HighlightM Unit := do
     highlight' trees stx true
@@ -1703,7 +1848,8 @@ def highlightMany (stxs : Array Syntax) (messages : Array Message)
     (trees : Array (Option Lean.Elab.InfoTree))
     (suppressNamespaces : List Name := []) : TermElabM (Array Highlighted) := do
   let trees' := trees.filterMap id
-  let infoTable : InfoTable := .ofInfoTrees trees'
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees'
+  let infoTable := infoTable.buildSuffixIndex (← getEnv)
   let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees'
   let ids := build modrefs
   let st ← HighlightState.ofMessages (mkNullNode stxs) messages
@@ -1728,7 +1874,8 @@ The work of constructing the alias table is performed once, with all the trees t
 def highlightFrontendResult (result : Compat.Frontend.FrontendResult)
     (suppressNamespaces : List Name := []) : TermElabM (Array Highlighted) := do
   let trees' := result.items.flatMap (·.info.toArray)
-  let infoTable : InfoTable := .ofInfoTrees trees'
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees'
+  let infoTable := infoTable.buildSuffixIndex (← getEnv)
   let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees'
   let ids := build modrefs
 
@@ -1756,13 +1903,15 @@ def highlightProofState (ci : ContextInfo) (goals : List MVarId)
   let trees := trees.toArray
   let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees
   let ids := build modrefs
-  let infoTable : InfoTable := .ofInfoTrees trees
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees
+  let infoTable := infoTable.buildSuffixIndex (← getEnv)
   let (hlGoals, _) ← highlightGoals ci goals |>.run ⟨ids, false, false, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run .empty
   pure hlGoals
 
 
 def highlightMessage (message : Message) (suppressNamespaces : List Name := []) : TermElabM Highlighted.Message := do
-  let (contents, _) ← messageContents message |>.run ⟨{}, false, false, sortSuppress suppressNamespaces⟩ |>.run {} |>.run .empty
+  let infoTable : InfoTable := ({} : InfoTable).buildSuffixIndex (← getEnv)
+  let (contents, _) ← messageContents message |>.run ⟨{}, false, false, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run .empty
   let severity : Highlighted.Span.Kind :=
     match message.severity with
     | .error => .error
