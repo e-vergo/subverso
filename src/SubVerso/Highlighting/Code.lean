@@ -1360,7 +1360,7 @@ def highlightGoals (ci : ContextInfo) (goals : List MVarId) :
       renderTagged none (← runMeta <| ppCodeWithInfos e)
     goalView := goalView.push ⟨name, Meta.getGoalPrefix mvDecl, hyps, concl⟩
   let elapsed := (← IO.monoMsNow) - startTime
-  if elapsed > 10 then  -- Only log slow goal highlighting
+  if elapsed > 5 then  -- Log goal highlighting taking >5ms
     IO.eprintln s!"[SUBVERSO TIMING] highlightGoals: {elapsed}ms | {numGoals} goals, {totalHyps} hyps"
   pure goalView
 
@@ -1505,7 +1505,7 @@ partial def findTactics
 
   let result ← findTactics' stx startPos endPos endPosition (before := before)
   let elapsed := (← IO.monoMsNow) - startTime
-  if elapsed > 10 then
+  if elapsed > 5 then  -- Log findTactics taking >5ms
     IO.eprintln s!"[SUBVERSO TIMING] findTactics: {elapsed}ms | found={result.isSome}"
   return result
 
