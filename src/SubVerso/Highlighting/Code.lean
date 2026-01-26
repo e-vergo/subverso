@@ -42,22 +42,28 @@ structure InfoTable where
   termInfoByName : Compat.HashMap Name (Array (ContextInfo × TermInfo)) := {}
   /-- Index from final name component string to full names for O(1) suffix lookup -/
   nameSuffixIndex : Compat.HashMap String (Array Name) := {}
+  /-- All info nodes with positions, sorted by start position for containment queries.
+      Each entry is (startPos, endPos, ctx, info). Sorted by startPos ascending. -/
+  allInfoSorted : Array (String.Pos.Raw × String.Pos.Raw × ContextInfo × Info) := #[]
 
-instance : Inhabited InfoTable := ⟨⟨{}, {}, {}, {}⟩⟩
+instance : Inhabited InfoTable := ⟨⟨{}, {}, {}, {}, #[]⟩⟩
 
 /--
 Adds info to the table. Populates:
 - `tacticInfo` for tactic nodes
 - `infoByExactPos` for all info nodes with valid positions
 - `termInfoByName` for term info with const/fvar expressions
+- `allInfoSorted` for containment queries (will be sorted after all adds)
 -/
 def InfoTable.add (ctx : ContextInfo) (i : Info) (table : InfoTable) : InfoTable :=
-  -- First, add to infoByExactPos for O(1) position lookup
+  -- First, add to infoByExactPos for O(1) position lookup and allInfoSorted for containment
   let table :=
     if let (some startPos, some endPos) := (i.stx.getPos? true, i.stx.getTailPos? true) then
       let key := (startPos, endPos)
-      { table with infoByExactPos := table.infoByExactPos.insert key <|
-        ((Compat.HashMap.get? table.infoByExactPos key).getD #[]).push (ctx, i)
+      { table with
+        infoByExactPos := table.infoByExactPos.insert key <|
+          ((Compat.HashMap.get? table.infoByExactPos key).getD #[]).push (ctx, i)
+        allInfoSorted := table.allInfoSorted.push (startPos, endPos, ctx, i)
       }
     else table
   -- Then handle specific info types
@@ -92,7 +98,9 @@ where
     | _, .hole _ => table
 
 def InfoTable.ofInfoTrees (ts : Array InfoTree) (init : InfoTable := {}) : InfoTable :=
-  ts.foldl (init := init) (fun tbl t => .ofInfoTree t (init := tbl))
+  let table := ts.foldl (init := init) (fun tbl t => .ofInfoTree t (init := tbl))
+  -- Sort by start position for efficient containment queries
+  { table with allInfoSorted := table.allInfoSorted.qsort (fun a b => a.1 < b.1) }
 
 def InfoTable.tacticInfo? (stx : Syntax) (table : InfoTable) : Option (Array (ContextInfo × TacticInfo)) := do
   let rng ← stx.getRange? (canonicalOnly := true)
@@ -122,6 +130,29 @@ def InfoTable.buildSuffixIndex (env : Environment) (table : InfoTable) : InfoTab
 /-- O(1) lookup for constants by suffix -/
 def InfoTable.lookupBySuffix (table : InfoTable) (suffix : String) : Array Name :=
   Compat.HashMap.get? table.nameSuffixIndex suffix |>.getD #[]
+
+/--
+Find info nodes whose range CONTAINS the given syntax.
+Uses linear scan of sorted array. For containment: info.start <= stx.start && info.end >= stx.end.
+Since the array is sorted by start position, we can stop early once start > queryStart.
+-/
+def InfoTable.lookupContaining (table : InfoTable) (stx : Syntax) : Array (ContextInfo × Info) := Id.run do
+  let some queryStart := stx.getPos? true | return #[]
+  let some queryEnd := stx.getTailPos? true | return #[]
+  let arr := table.allInfoSorted
+  let mut result : Array (ContextInfo × Info) := #[]
+  let mut i := 0
+  while h : i < arr.size do
+    let entry := arr[i]
+    let (startPos, endPos, ctx, info) := entry
+    -- Since sorted by startPos, once startPos > queryStart, no more candidates
+    if startPos > queryStart then
+      break
+    -- Check containment: startPos <= queryStart (guaranteed) && endPos >= queryEnd
+    if endPos >= queryEnd then
+      result := result.push (ctx, info)
+    i := i + 1
+  return result
 
 structure Context where
   ids : HashMap Lsp.RefIdent Lsp.RefIdent
@@ -845,12 +876,14 @@ def identKind' (stx : TSyntax `ident) (allowUnknownTyped : Bool := false) : High
     if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
       if seen.priority > kind.priority then kind := seen
 
-  -- Pass 2: Fallback to containment search if needed (still O(N) but only runs on miss)
+  -- Pass 2: Fallback to containment search if needed
   -- This helps find TermInfo for identifiers inside tactic arguments
+  -- Uses O(log N + k) lookup via InfoTable where k is number of containing nodes
   if kind == .unknown then
-    -- We need trees for this fallback - but they're not passed to us anymore
-    -- Skip this pass for now; it's rarely needed and we have other fallbacks
-    pure ()
+    for (ci, info) in table.lookupContaining stx do
+      if ctxInfo?.isNone then ctxInfo? := some ci
+      if let some seen ← infoKind ci info (allowUnknownTyped := allowUnknownTyped) then
+        if seen.priority > kind.priority then kind := seen
 
   -- Pass 3: O(1) lookup by name via InfoTable
   if kind == .unknown then
@@ -1412,40 +1445,42 @@ partial def findTactics
 
   -- Place the initial proof state after the `by` token
   if stx matches .atom _ "by" then
-    for t in trees do
-      for i in infoIncludingSyntax t stx |>.reverse do
-        if not i.2.isOriginal then continue
-        if let (_, .ofTacticInfo tacticInfo) := i then
-          match tacticInfo.stx with
-          | `(Lean.Parser.Term.byTactic| by%$tk $tactics)
-          | `(Lean.Parser.Term.byTactic'| by%$tk $tactics) =>
-            if tk == stx then
-              let ts ← findTactics' tactics startPos endPos endPosition (before := true)
-              return ts
-          | _ => continue
+    -- Use O(log N) InfoTable lookup instead of O(N) tree traversal
+    let table ← readThe InfoTable
+    for i in table.lookupContaining stx |>.reverse do
+      if not i.2.isOriginal then continue
+      if let (_, .ofTacticInfo tacticInfo) := i then
+        match tacticInfo.stx with
+        | `(Lean.Parser.Term.byTactic| by%$tk $tactics)
+        | `(Lean.Parser.Term.byTactic'| by%$tk $tactics) =>
+          if tk == stx then
+            let ts ← findTactics' tactics startPos endPos endPosition (before := true)
+            return ts
+        | _ => continue
 
   -- Special handling for =>: show the _before state_
   if stx matches .atom _ "=>" then
-    for t in trees do
-      for i in infoIncludingSyntax t stx |>.reverse do
-        if not i.2.isOriginal then continue
-        if let (ci, .ofTacticInfo tacticInfo) := i then
-          if tacticInfo.stx.getKind == nullKind then
-            if let some tacStx := tacticInfo.stx.getArgs.back? then
-              if tacStx == stx then
-                return some (← tacticInfoGoals ci tacticInfo startPos endPos endPosition (before := true))
+    -- Use O(log N) InfoTable lookup instead of O(N) tree traversal
+    let table ← readThe InfoTable
+    for i in table.lookupContaining stx |>.reverse do
+      if not i.2.isOriginal then continue
+      if let (ci, .ofTacticInfo tacticInfo) := i then
+        if tacticInfo.stx.getKind == nullKind then
+          if let some tacStx := tacticInfo.stx.getArgs.back? then
+            if tacStx == stx then
+              return some (← tacticInfoGoals ci tacticInfo startPos endPos endPosition (before := true))
 
-          match tacticInfo.stx with
-          | `(Lean.Parser.Tactic.inductionAlt| $_lhs =>%$tk $rhs )
-          | `(tactic| next $_* =>%$tk $rhs )
-          | `(tactic| conv =>%$tk $rhs )
-          | `(tactic| conv at $_ =>%$tk $rhs )
-          | `(tactic| conv in $_:term =>%$tk $rhs )
-          | `(tactic| case $_ $_* =>%$tk $rhs )
-          | `(tactic| case' $_ $_* =>%$tk $rhs ) =>
-            if tk == stx then
-              return (← findTactics' rhs startPos endPos endPosition (before := true))
-          | _ => continue
+        match tacticInfo.stx with
+        | `(Lean.Parser.Tactic.inductionAlt| $_lhs =>%$tk $rhs )
+        | `(tactic| next $_* =>%$tk $rhs )
+        | `(tactic| conv =>%$tk $rhs )
+        | `(tactic| conv at $_ =>%$tk $rhs )
+        | `(tactic| conv in $_:term =>%$tk $rhs )
+        | `(tactic| case $_ $_* =>%$tk $rhs )
+        | `(tactic| case' $_ $_* =>%$tk $rhs ) =>
+          if tk == stx then
+            return (← findTactics' rhs startPos endPos endPosition (before := true))
+        | _ => continue
 
   -- Only show tactic output for the most specific source spans possible, with a few exceptions
   if stx.getKind ∉ [``Lean.Parser.Tactic.rwSeq,``Lean.Parser.Tactic.simp] then
@@ -1620,17 +1655,17 @@ def highlightSpecial
             let endPosition := text.toPosition endPos
             -- Starting in Lean 4.14, each case/tactic alt gets its own TacticInfo. This will
             -- highlight them appropriately. Older Lean versions will have less information here.
-            for t in trees do
-              let i := infoIncludingSyntax t l
-              for (ci, i) in i do
-                if let .ofTacticInfo ti := i then
-                  if ti.stx.getKind == nullKind then
-                    let preArr := i.stx[0]
-                    if preArr.getKind == nullKind && preArr[0] == l then
-                      let (goals, _, _, _) ← tacticInfoGoals ci ti startPos endPos endPosition (before := true)
-                      if !goals.isEmpty then
-                        HighlightM.openTactic goals startPos endPos endPosition
-                        lhsTactics := false
+            -- Uses O(log N + k) InfoTable lookup instead of O(N) tree traversal
+            let table ← readThe InfoTable
+            for (ci, i) in table.lookupContaining l do
+              if let .ofTacticInfo ti := i then
+                if ti.stx.getKind == nullKind then
+                  let preArr := i.stx[0]
+                  if preArr.getKind == nullKind && preArr[0] == l then
+                    let (goals, _, _, _) ← tacticInfoGoals ci ti startPos endPos endPosition (before := true)
+                    if !goals.isEmpty then
+                      HighlightM.openTactic goals startPos endPos endPosition
+                      lhsTactics := false
         hl trees lhsTactics none l
 
       -- Use the RHS start goals for the arrow
