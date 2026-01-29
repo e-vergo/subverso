@@ -1317,10 +1317,7 @@ def renderOrGetCodeWithInfos (key : Expr) (render : Expr → HighlightM CodeWith
 
 def highlightGoals (ci : ContextInfo) (goals : List MVarId) :
     HighlightM (Array (Highlighted.Goal Highlighted)) := withReader (·.noDefinitions) do
-  let startTime ← IO.monoMsNow
-  let numGoals := goals.length
   let mut goalView := #[]
-  let mut totalHyps := 0
   for g in goals do
     let mut hyps := #[]
     let some mvDecl := ci.mctx.findDecl? g
@@ -1341,7 +1338,6 @@ def highlightGoals (ci : ContextInfo) (goals : List MVarId) :
       let some decl := c
         | continue
       if decl.isAuxDecl || decl.isImplementationDetail then continue
-      totalHyps := totalHyps + 1
       match decl with
       | .cdecl _index fvar name type _ _ =>
         let nk ← exprKind ci lctx none (.fvar fvar)
@@ -1359,9 +1355,6 @@ def highlightGoals (ci : ContextInfo) (goals : List MVarId) :
     let concl ← renderOrGet mvDecl.type fun e => do
       renderTagged none (← runMeta <| ppCodeWithInfos e)
     goalView := goalView.push ⟨name, Meta.getGoalPrefix mvDecl, hyps, concl⟩
-  let elapsed := (← IO.monoMsNow) - startTime
-  if elapsed > 5 then  -- Log goal highlighting taking >5ms
-    IO.eprintln s!"[SUBVERSO TIMING] highlightGoals: {elapsed}ms | {numGoals} goals, {totalHyps} hyps"
   pure goalView
 
 def tacticInfoGoals
@@ -1439,7 +1432,6 @@ partial def findTactics
     (before : Bool := false)
     : HighlightM (Option (Array (Highlighted.Goal Highlighted) × Compat.String.Pos × Compat.String.Pos × Position)) :=
   withTraceNode `SubVerso.Highlighting.Code (fun x => pure m!"findTactics {stx} ==> {match x with | .error _ => "err" | .ok v => v.map (fun _ => "yes") |>.getD "no"}") <| do
-  let startTime ← IO.monoMsNow
   let text ← getFileMap
   let some startPos := stx.getPos?
     | return none
@@ -1498,16 +1490,9 @@ partial def findTactics
   -- output. Get the right one to show for the whole thing, then adjust its positioning.
   if let some brak := Compat.rwTacticRightBracket? stx then
     if let some (goals, _startPos, _endPos, _endPosition) ← findTactics trees brak then
-      let elapsed := (← IO.monoMsNow) - startTime
-      if elapsed > 10 then
-        IO.eprintln s!"[SUBVERSO TIMING] findTactics (rwTactic): {elapsed}ms"
       return some (goals, startPos, endPos, endPosition)
 
-  let result ← findTactics' stx startPos endPos endPosition (before := before)
-  let elapsed := (← IO.monoMsNow) - startTime
-  if elapsed > 5 then  -- Log findTactics taking >5ms
-    IO.eprintln s!"[SUBVERSO TIMING] findTactics: {elapsed}ms | found={result.isSome}"
-  return result
+  findTactics' stx startPos endPos endPosition (before := before)
 
 partial def highlightLevel (u : TSyntax `level) : HighlightM Unit := do
   match u with
@@ -1869,48 +1854,25 @@ def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
     (trees : PersistentArray Lean.Elab.InfoTree)
     (suppressNamespaces : List Name := [])
     (startPos? endPos? : Option Compat.String.Pos := none) : TermElabM Highlighted := do
-  let totalStart ← IO.monoMsNow
-
   let trees := trees.toArray
 
-  -- Timing: findModuleRefs
-  let modrefsStart ← IO.monoMsNow
   let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees
-  let modrefsElapsed := (← IO.monoMsNow) - modrefsStart
-
-  -- Timing: build (union-find)
-  let buildStart ← IO.monoMsNow
   let ids := build modrefs
-  let buildElapsed := (← IO.monoMsNow) - buildStart
 
   let startPos? := startPos? <|> stx.getPos?
   let endPos? := endPos? <|> Internal.getTrailingOrTailPos? stx
 
   let st ← HighlightState.ofMessages stx messages startPos? endPos?
 
-  -- Timing: InfoTable.ofInfoTrees
-  let infoTableStart ← IO.monoMsNow
   let infoTable : InfoTable := InfoTable.ofInfoTrees trees
-  let infoTableElapsed := (← IO.monoMsNow) - infoTableStart
-
-  -- Timing: buildSuffixIndex
-  let suffixStart ← IO.monoMsNow
   let infoTable := infoTable.buildSuffixIndex (← getEnv)
-  let suffixElapsed := (← IO.monoMsNow) - suffixStart
 
   let doHighlight : HighlightM Unit := do
     highlight' trees stx true
     if let some endPos := endPos? then
       fillMissingSourceUpTo endPos
 
-  -- Timing: highlight' (main traversal)
-  let highlightStart ← IO.monoMsNow
   let ((), {output := output, ..}) ← doHighlight.run ⟨ids, true, true, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run st
-  let highlightElapsed := (← IO.monoMsNow) - highlightStart
-
-  let totalElapsed := (← IO.monoMsNow) - totalStart
-  if totalElapsed > 50 then  -- Only log if total > 50ms
-    IO.eprintln s!"[SUBVERSO TIMING] highlightIncludingUnparsed total={totalElapsed}ms | modrefs={modrefsElapsed}ms build={buildElapsed}ms infoTable={infoTableElapsed}ms suffix={suffixElapsed}ms highlight={highlightElapsed}ms"
 
   pure <| .fromOutput output
 
