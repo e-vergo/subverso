@@ -1,3 +1,91 @@
+# SubVerso (Side-by-Side Blueprint Fork)
+
+A fork of [SubVerso](https://github.com/leanprover/subverso) optimized for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) toolchain.
+
+## What is SubVerso?
+
+SubVerso extracts syntax highlighting information from Lean code, including:
+- Token classification (keywords, constants, variables, etc.)
+- Type information for hover tooltips
+- Proof state visualization
+- Cross-reference linking between definition and usage sites
+
+This data powers the interactive code displays in Verso documentation and the Side-by-Side Blueprint formalization toolchain.
+
+## Fork Optimizations
+
+This fork adds performance optimizations for blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of build time. The optimizations focus on reducing redundant tree traversals and providing O(1) lookups.
+
+### InfoTable Indexing
+
+The `InfoTable` structure pre-processes info trees once, replacing repeated O(n) traversals with O(1) lookups:
+
+```lean
+structure InfoTable where
+  tacticInfo : HashMap Compat.Syntax.Range (Array (ContextInfo × TacticInfo))
+  infoByExactPos : HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info))
+  termInfoByName : HashMap Name (Array (ContextInfo × TermInfo))
+  nameSuffixIndex : HashMap String (Array Name)
+  allInfoSorted : Array (String.Pos.Raw × String.Pos.Raw × ContextInfo × Info)
+```
+
+Key lookup functions:
+- `lookupByExactPos`: O(1) info lookup by syntax position
+- `lookupTermInfoByName`: O(1) TermInfo lookup for constants/fvars
+- `lookupBySuffix`: O(1) constant lookup by final name component
+- `lookupContaining`: Linear scan with early termination for containment queries
+
+### Caching
+
+The `HighlightState` includes caches to avoid recomputing expensive operations:
+
+- `identKindCache`: Memoizes identifier classification by (position, name)
+- `signatureCache`: Memoizes pretty-printed signatures by constant name
+- `terms` / `ppTerms`: Caches rendered expressions from hovers and proof states
+- `hasTacticCache` / `childHasTacticCache`: Memoizes tactic info searches
+
+### Tactic Argument Highlighting
+
+Enhanced highlighting for tactic arguments that reference theorems, enabling proper hover information even when identifiers appear in tactic contexts.
+
+## Role in Dependency Chain
+
+```
+SubVerso -> LeanArchitect -> Dress -> Runway
+```
+
+SubVerso is the foundation of the toolchain. LeanArchitect, Dress, and Runway all depend on it for syntax highlighting extraction.
+
+## Installation
+
+Add to your `lakefile.toml`:
+
+```toml
+[[require]]
+name = "subverso"
+git = "https://github.com/e-vergo/subverso.git"
+rev = "main"
+```
+
+Or `lakefile.lean`:
+
+```lean
+require subverso from git "https://github.com/e-vergo/subverso.git"
+```
+
+## Upstream
+
+This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso). The original README content about SubVerso's general features, version compatibility, and module system is preserved below.
+
+## Related Repositories
+
+- [Dress](https://github.com/e-vergo/Dress) - Artifact generation using SubVerso highlighting
+- [LeanArchitect](https://github.com/e-vergo/LeanArchitect) - `@[blueprint]` attribute
+- [Runway](https://github.com/e-vergo/Runway) - Site generator
+- [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Parent project
+
+---
+
 # SubVerso - Verso's Library for Subprocesses
 
 SubVerso is a support library that allows a
@@ -99,7 +187,7 @@ objects have the following keys:
  * `code` - the internal SubVerso JSON format for the highlighted
    code, including proof states, which is intended to be deserialized
    using the `FromJson Highlighted` instance from SubVerso.
-   
+
 The `highlighted` facet for a package, library, or module builds
 highlighted sources.
 
@@ -116,4 +204,3 @@ protocol reminiscent of JSON-RPC, but this is an implementation
 detail - it should be used via the API in `SubVerso.Helper`. It can
 presently be used to elaborate and highlight terms in the context of a
 module.
- 
