@@ -1,5 +1,8 @@
 # SubVerso (Side-by-Side Blueprint Fork)
 
+![Lean](https://img.shields.io/badge/Lean-v4.27.0-blue)
+![License](https://img.shields.io/badge/License-Apache%202.0-green)
+
 A fork of [SubVerso](https://github.com/leanprover/subverso) optimized for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) toolchain.
 
 ## What is SubVerso?
@@ -12,24 +15,33 @@ SubVerso extracts syntax highlighting information from Lean code, including:
 
 This data powers the interactive code displays in Verso documentation and the Side-by-Side Blueprint formalization toolchain.
 
-## Fork Optimizations
+## Fork Changes
 
 This fork adds performance optimizations for blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of build time. The optimizations focus on reducing redundant tree traversals and providing O(1) lookups.
 
-### InfoTable Indexing
+### InfoTable Optimizations
 
-The `InfoTable` structure pre-processes info trees once, replacing repeated O(n) traversals with O(1) lookups:
+The `InfoTable` structure pre-processes info trees once during elaboration, replacing repeated O(n) tree traversals with O(1) HashMap lookups:
 
 ```lean
 structure InfoTable where
-  tacticInfo : HashMap Compat.Syntax.Range (Array (ContextInfo × TacticInfo))
-  infoByExactPos : HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info))
-  termInfoByName : HashMap Name (Array (ContextInfo × TermInfo))
-  nameSuffixIndex : HashMap String (Array Name)
+  tacticInfo : Compat.HashMap Compat.Syntax.Range (Array (ContextInfo × TacticInfo))
+  infoByExactPos : Compat.HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info))
+  termInfoByName : Compat.HashMap Name (Array (ContextInfo × TermInfo))
+  nameSuffixIndex : Compat.HashMap String (Array Name)
   allInfoSorted : Array (String.Pos.Raw × String.Pos.Raw × ContextInfo × Info)
 ```
 
-Key lookup functions:
+**Index structures**:
+
+| Field | Purpose | Complexity |
+|-------|---------|------------|
+| `infoByExactPos` | Info lookup by exact syntax position (start, end) | O(1) |
+| `termInfoByName` | TermInfo lookup for const/fvar expressions by name | O(1) |
+| `nameSuffixIndex` | Constant lookup by final name component (e.g., `"add"` finds `Nat.add`) | O(1) |
+| `allInfoSorted` | Sorted array for containment queries with early exit | O(n) worst case |
+
+**Lookup functions**:
 - `lookupByExactPos`: O(1) info lookup by syntax position
 - `lookupTermInfoByName`: O(1) TermInfo lookup for constants/fvars
 - `lookupBySuffix`: O(1) constant lookup by final name component
@@ -44,6 +56,13 @@ The `HighlightState` includes caches to avoid recomputing expensive operations:
 - `terms` / `ppTerms`: Caches rendered expressions from hovers and proof states
 - `hasTacticCache` / `childHasTacticCache`: Memoizes tactic info searches
 
+### Graceful Error Handling
+
+Uses `throw <| IO.userError` for recoverable errors in critical paths instead of panicking. Locations include:
+- Netstring protocol decoding (EOF handling, length parsing, message framing)
+- Project loading (lakefile/toolchain validation)
+- JSON deserialization (example parsing)
+
 ### Tactic Argument Highlighting
 
 Enhanced highlighting for tactic arguments that reference theorems, enabling proper hover information even when identifiers appear in tactic contexts.
@@ -54,7 +73,7 @@ Enhanced highlighting for tactic arguments that reference theorems, enabling pro
 SubVerso -> LeanArchitect -> Dress -> Runway
 ```
 
-SubVerso is the foundation of the toolchain. LeanArchitect, Dress, and Runway all depend on it for syntax highlighting extraction.
+SubVerso is the foundation of the toolchain. Changes here propagate to all downstream repositories.
 
 ## Installation
 
@@ -73,20 +92,24 @@ Or `lakefile.lean`:
 require subverso from git "https://github.com/e-vergo/subverso.git"
 ```
 
-## Upstream
-
-This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso). The original README content about SubVerso's general features, version compatibility, and module system is preserved below.
-
 ## Related Repositories
 
-- [Dress](https://github.com/e-vergo/Dress) - Artifact generation using SubVerso highlighting
+**Upstream**:
+- [leanprover/subverso](https://github.com/leanprover/subverso) - Original SubVerso
+
+**Downstream** (depend on this fork):
 - [LeanArchitect](https://github.com/e-vergo/LeanArchitect) - `@[blueprint]` attribute
+- [Dress](https://github.com/e-vergo/Dress) - Artifact generation using SubVerso highlighting
 - [Runway](https://github.com/e-vergo/Runway) - Site generator
-- [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Parent project
+
+**Parent project**:
+- [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Monorepo containing all toolchain components
 
 ---
 
 # SubVerso - Verso's Library for Subprocesses
+
+*Original upstream documentation follows.*
 
 SubVerso is a support library that allows a
 [Verso](https://github.com/leanprover/verso) document to describe Lean
