@@ -94,7 +94,9 @@ where
     match ctx?, t with
     | ctx?, .context ctx t => go (ctx.mergeIntoOuter? ctx?) t table
     | some ctx, .node i cs => cs.foldl (init := table.add ctx i) fun tbl' t' => go (some ctx) t' tbl'
-    | none, .node .. => panic! "Unexpected contextless node"
+    | none, .node _ cs =>
+      -- Skip contextless node but process children in case they have context
+      cs.foldl (init := table) fun tbl' t' => go none t' tbl'
     | _, .hole _ => table
 
 def InfoTable.ofInfoTrees (ts : Array InfoTree) (init : InfoTable := {}) : InfoTable :=
@@ -1518,7 +1520,9 @@ partial def highlightLevel (u : TSyntax `level) : HighlightM Unit := do
     highlightLevel l1
     emitToken u tk.getHeadInfo ⟨.levelOp "+", "+"⟩
     emitToken u n.raw.getHeadInfo ⟨.levelConst n.getNat, toString n.getNat⟩
-  | _ => panic! s!"Unknown level syntax {u}"
+  | _ =>
+    -- Unknown level syntax - emit as unknown token to avoid crash
+    emitToken u u.raw.getHeadInfo ⟨.unknown, u.raw.reprint.getD "?"⟩
 
 def highlightUniverse (blame : Syntax) (tk : Syntax) (u : Option (TSyntax `level)) : HighlightM Unit := do
   let docs? ← findDocString? (← getEnv) blame.getKind

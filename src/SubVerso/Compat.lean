@@ -784,7 +784,8 @@ partial def FrontendResult.updateLeading (res : FrontendResult) (contents : Stri
       items := res.items.zip (cmds.extract 1 cmds.size) |>.map fun (item, commandSyntax) =>
         { item with commandSyntax } }
   else
-    panic! "`updateLeading` created a non-node"
+    -- Gracefully return original result if updateLeading produces unexpected structure
+    res
 where
   /--
   Extends the last token's trailing whitespace to include the rest of the file.

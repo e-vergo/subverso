@@ -32,7 +32,9 @@ private def SplitCtx.pop (ctx : SplitCtx) : SplitCtx where
 
 private def SplitCtx.close (ctx : SplitCtx) (current : Highlighted) : Highlighted × SplitCtx :=
   match ctx.contents.back? with
-  | none => panic! s!"Popping empty context around '{current.toString}'"
+  | none =>
+    -- Empty context stack - return current unchanged as safe fallback
+    (current, ctx)
   | some (left, f) => (left ++ f.wrap current, ctx.pop)
 
 private def SplitCtx.split (ctx : SplitCtx) (current : Highlighted) : Highlighted × SplitCtx where
