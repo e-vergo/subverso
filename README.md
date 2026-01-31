@@ -1,38 +1,34 @@
 # SubVerso (Side-by-Side Blueprint Fork)
 
-![Lean](https://img.shields.io/badge/Lean-v4.27.0-blue)
-![License](https://img.shields.io/badge/License-Apache%202.0-green)
+This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso) maintained for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) formalization documentation toolchain.
 
-A fork of [SubVerso](https://github.com/leanprover/subverso) optimized for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) toolchain.
+## Overview
 
-## What is SubVerso?
+SubVerso extracts syntax highlighting and semantic information from Lean code during elaboration. It produces:
 
-SubVerso extracts syntax highlighting information from Lean code, including:
-- Token classification (keywords, constants, variables, etc.)
-- Type information for hover tooltips
-- Proof state visualization
+- Token classification (keywords, constants, variables, string literals)
+- Type signatures for hover tooltips
+- Proof state visualization at tactic positions
 - Cross-reference linking between definition and usage sites
 
-This data powers the interactive code displays in Verso documentation and the Side-by-Side Blueprint formalization toolchain.
+This data is consumed by Verso documentation and the Side-by-Side Blueprint toolchain to render interactive Lean code displays with hovers, type information, and proof state views.
 
-## Fork Changes
+## Fork Modifications
 
-This fork adds performance optimizations for blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of build time. The optimizations focus on reducing redundant tree traversals and providing O(1) lookups.
+This fork addresses performance bottlenecks discovered during blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of total build time. The modifications fall into three categories: indexed lookups, caching, and improved identifier resolution.
 
-### InfoTable Optimizations
+### InfoTable Structure
 
-The `InfoTable` structure pre-processes info trees once during elaboration, replacing repeated O(n) tree traversals with O(1) HashMap lookups:
+The original SubVerso traverses the info tree repeatedly during highlighting. This fork introduces `InfoTable`, which pre-processes the tree once and provides O(1) lookups via HashMap indices:
 
 ```lean
 structure InfoTable where
-  tacticInfo : Compat.HashMap Compat.Syntax.Range (Array (ContextInfo × TacticInfo))
-  infoByExactPos : Compat.HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info))
-  termInfoByName : Compat.HashMap Name (Array (ContextInfo × TermInfo))
-  nameSuffixIndex : Compat.HashMap String (Array Name)
+  tacticInfo : HashMap Syntax.Range (Array (ContextInfo × TacticInfo))
+  infoByExactPos : HashMap (String.Pos.Raw × String.Pos.Raw) (Array (ContextInfo × Info))
+  termInfoByName : HashMap Name (Array (ContextInfo × TermInfo))
+  nameSuffixIndex : HashMap String (Array Name)
   allInfoSorted : Array (String.Pos.Raw × String.Pos.Raw × ContextInfo × Info)
 ```
-
-**Index structures**:
 
 | Field | Purpose | Complexity |
 |-------|---------|------------|
@@ -41,43 +37,63 @@ structure InfoTable where
 | `nameSuffixIndex` | Constant lookup by final name component (e.g., `"add"` finds `Nat.add`) | O(1) |
 | `allInfoSorted` | Sorted array for containment queries with early exit | O(n) worst case |
 
-**Lookup functions**:
-- `lookupByExactPos`: O(1) info lookup by syntax position
-- `lookupTermInfoByName`: O(1) TermInfo lookup for constants/fvars
-- `lookupBySuffix`: O(1) constant lookup by final name component
+The table is built once per file via `InfoTable.ofInfoTrees`, then queried through:
+
+- `lookupByExactPos`: O(1) lookup by syntax position
+- `lookupTermInfoByName`: O(1) lookup for constants and free variables by name
+- `lookupBySuffix`: O(1) lookup for constants by their final name component
 - `lookupContaining`: Linear scan with early termination for containment queries
 
-### Caching
+### HighlightState Caches
 
-The `HighlightState` includes caches to avoid recomputing expensive operations:
+The `HighlightState` structure includes memoization for expensive operations:
 
-- `identKindCache`: Memoizes identifier classification by (position, name)
-- `signatureCache`: Memoizes pretty-printed signatures by constant name
+```lean
+structure HighlightState where
+  -- ... message and output state ...
+  hasTacticCache : HashMap Syntax.Range (Array (Syntax × Bool))
+  childHasTacticCache : HashMap Syntax.Range (Array (Syntax × Bool))
+  terms : HashMap Expr Highlighted
+  ppTerms : HashMap Expr CodeWithInfos
+  identKindCache : HashMap (String.Pos.Raw × Name) Token.Kind
+  signatureCache : HashMap Name String
+```
+
+- `identKindCache`: Memoizes identifier classification by (position, name), avoiding redundant info tree traversals
+- `signatureCache`: Memoizes pretty-printed type signatures by constant name
 - `terms` / `ppTerms`: Caches rendered expressions from hovers and proof states
-- `hasTacticCache` / `childHasTacticCache`: Memoizes tactic info searches
+- `hasTacticCache` / `childHasTacticCache`: Memoizes tactic info searches by syntax range
+
+### Enhanced Identifier Resolution
+
+The `identKind` function uses a multi-stage fallback strategy to resolve identifiers that lack direct info tree matches:
+
+1. **Exact syntax match**: Look for info nodes with matching position
+2. **Enclosing info search**: Find info nodes whose range contains the identifier (handles tactic arguments)
+3. **Name-based search**: Search for TermInfo by identifier name regardless of position (handles macro expansion)
+4. **Environment lookup**: Look up the identifier directly in the environment (handles simp lemma arguments and raw name references)
+
+This addresses cases where position-based matching fails due to macro expansion or tactic elaboration.
 
 ### Graceful Error Handling
 
-Uses `throw <| IO.userError` for recoverable errors in critical paths instead of panicking. Locations include:
-- Netstring protocol decoding (EOF handling, length parsing, message framing)
-- Project loading (lakefile/toolchain validation)
-- JSON deserialization (example parsing)
+The fork replaces panics with recoverable errors in critical paths:
 
-### Tactic Argument Highlighting
+- `InfoTable.ofInfoTree`: Skips contextless nodes instead of panicking, processes children to find valid context
+- Netstring protocol: Uses `IO.userError` for EOF, length parsing, and message framing errors
+- Project loading: Validates lakefile/toolchain with proper error messages
 
-Enhanced highlighting for tactic arguments that reference theorems, enabling proper hover information even when identifiers appear in tactic contexts.
-
-## Role in Dependency Chain
+## Dependency Chain
 
 ```
 SubVerso -> LeanArchitect -> Dress -> Runway
 ```
 
-SubVerso is the foundation of the toolchain. Changes here propagate to all downstream repositories.
+SubVerso is the foundation of the Side-by-Side Blueprint toolchain. Changes here propagate to all downstream repositories.
 
 ## Installation
 
-Add to your `lakefile.toml`:
+Add to `lakefile.toml`:
 
 ```toml
 [[require]]
@@ -92,138 +108,149 @@ Or `lakefile.lean`:
 require subverso from git "https://github.com/e-vergo/subverso.git"
 ```
 
+## API Reference
+
+### Highlighting
+
+The primary entry point for syntax highlighting:
+
+```lean
+def highlight (stx : Syntax) (messages : Array Message)
+    (trees : PersistentArray InfoTree) (suppressNamespaces : List Name := [])
+    : TermElabM Highlighted
+```
+
+For code that may include unparsed regions:
+
+```lean
+def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
+    (trees : PersistentArray InfoTree) (suppressNamespaces : List Name := [])
+    (startPos? : Option String.Pos := none) (endPos? : Option String.Pos := none)
+    : TermElabM Highlighted
+```
+
+### Highlighted Data Type
+
+The output is a tree of `Highlighted` values:
+
+```lean
+inductive Highlighted where
+  | token (tok : Token)
+  | text (str : String)
+  | seq (highlights : Array Highlighted)
+  | span (info : Array (Span.Kind × MessageContents Highlighted)) (content : Highlighted)
+  | tactics (info : Array (Goal Highlighted)) (startPos endPos : Nat) (content : Highlighted)
+  | point (kind : Span.Kind) (info : MessageContents Highlighted)
+  | unparsed (str : String)
+```
+
+Tokens carry semantic information:
+
+```lean
+inductive Token.Kind where
+  | keyword (name : Option Name) (occurrence : Option String) (docs : Option String)
+  | const (name : Name) (signature : String) (docs : Option String) (isDef : Bool)
+  | var (name : FVarId) (type : String)
+  | str (string : String)
+  | sort (doc? : Option String)
+  -- ... level operators, module names, etc.
+```
+
+### Proof State Extraction
+
+```lean
+def highlightGoals (ci : ContextInfo) (goals : List MVarId)
+    : HighlightM (Array (Goal Highlighted))
+
+def highlightProofState (ci : ContextInfo) (goals : List MVarId)
+    (trees : PersistentArray InfoTree) (suppressNamespaces : List Name := [])
+    : TermElabM (Array (Goal Highlighted))
+```
+
+### InfoTable Queries
+
+```lean
+def InfoTable.ofInfoTrees (ts : Array InfoTree) (init : InfoTable := {}) : InfoTable
+def InfoTable.lookupByExactPos (table : InfoTable) (stx : Syntax) : Array (ContextInfo × Info)
+def InfoTable.lookupTermInfoByName (table : InfoTable) (name : Name) : Array (ContextInfo × TermInfo)
+def InfoTable.lookupBySuffix (table : InfoTable) (suffix : String) : Array Name
+def InfoTable.lookupContaining (table : InfoTable) (stx : Syntax) : Array (ContextInfo × Info)
+```
+
+## Code Examples and Anchors
+
+SubVerso supports extracting named code regions using anchor comments:
+
+```lean
+-- ANCHOR: example_name
+def myFunction : Nat := 42
+-- ANCHOR_END: example_name
+```
+
+Proof states can be named within anchors:
+
+```lean
+example : n + 0 = n := by
+  -- ANCHOR: proof
+  induction n with
+  -- ^ PROOF_STATE: after_induction
+  | zero => rfl
+  | succ n ih => simp [ih]
+  -- ANCHOR_END: proof
+```
+
+## Module Extraction
+
+Extract highlighted module content to JSON:
+
+```
+$ subverso-extract-mod ModuleName output.json
+```
+
+The output contains an array of command objects with:
+- `kind`: Syntax kind of the command
+- `defines`: Names defined by the command
+- `code`: Highlighted code in SubVerso JSON format
+
 ## Related Repositories
 
 **Upstream**:
-- [leanprover/subverso](https://github.com/leanprover/subverso) - Original SubVerso
+- [leanprover/subverso](https://github.com/leanprover/subverso) - Original SubVerso by David Thrane Christiansen
 
 **Downstream** (depend on this fork):
-- [LeanArchitect](https://github.com/e-vergo/LeanArchitect) - `@[blueprint]` attribute
+- [LeanArchitect](https://github.com/e-vergo/LeanArchitect) - `@[blueprint]` attribute definition
 - [Dress](https://github.com/e-vergo/Dress) - Artifact generation using SubVerso highlighting
 - [Runway](https://github.com/e-vergo/Runway) - Site generator
 
 **Parent project**:
-- [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Monorepo containing all toolchain components
+- [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Monorepo for the complete toolchain
+
+## License
+
+Apache 2.0, following the original SubVerso license.
 
 ---
 
-# SubVerso - Verso's Library for Subprocesses
+## Original SubVerso Documentation
 
-*Original upstream documentation follows.*
+*The following is preserved from the upstream project.*
 
-SubVerso is a support library that allows a
-[Verso](https://github.com/leanprover/verso) document to describe Lean
-code written in multiple versions of Lean. Verso itself may be tied to
-new Lean versions, because it makes use of new compiler features. This
-library will maintain broader compatibility with various Lean versions.
+SubVerso is a support library that allows a [Verso](https://github.com/leanprover/verso) document to describe Lean code written in multiple versions of Lean. Verso itself may be tied to new Lean versions, because it makes use of new compiler features. This library will maintain broader compatibility with various Lean versions.
 
-## Versions and Compatibility
+### Versions and Compatibility
 
-SubVerso's CI currently validates it on every Lean release since
-4.0.0, along with whatever version or snapshot is currently targeted
-by Verso itself.
+SubVerso's CI currently validates it on every Lean release since 4.0.0, along with whatever version or snapshot is currently targeted by Verso itself.
 
-There should be no expectations of compatibility between different
-versions of SubVerso, however - the specifics of its data formats is
-an implementation detail, not a public API. Please use SubVerso itself
-to read and write the data.
+There should be no expectations of compatibility between different versions of SubVerso, however - the specifics of its data formats is an implementation detail, not a public API. Please use SubVerso itself to read and write the data.
 
-## Module System
+### Module System
 
-The code in `main` uses the Lean module system. For compatibility with
-older Lean versions, a "demodulized" version of the code is generated
-on each commit to `main`. This is force-pushed to the `no-modules`
-branch. The "demodulized" version has been rewritten by the script
-`demodulize.py`. Additionally, the no-module code generated from commit
-`abc123def456` on `main` is tagged with `no-modules/abc123def456` for posterity.
+The code in `main` uses the Lean module system. For compatibility with older Lean versions, a "demodulized" version of the code is generated on each commit to `main`. This is force-pushed to the `no-modules` branch.
 
-Versions of Lean prior to `4.25.0` or `nightly-2025-10-07` should use
-the `no-modules` branch.
-
-Projects which coordinate two Lean versions across the "module gap"
-can still check that the SubVerso versions are the same in CI. The
-file `.source-commit` in the `no-modules` branch contains the commit
-hash of `main` that it was generated from.
-
-## Features
-
-### Code Examples
-
-Presently, SubVerso supports the extraction of highlighting
-information from code. There may be a many-to-many relationship
-between Lean modules and documents that describe them. In these cases,
-using SubVerso's examples library to indicate examples to be shown in
-the text can be useful.
-
-This feature may also be useful for other applications that require
-careful presentation of Lean code.
-
-To use this feature, first add a dependency on `subverso` to your
-Lakefile:
-
-```
-require subverso from git "git@github.com:leanprover/subverso.git"
-```
-
-Examples are named in _anchors_, which are created using
-specially-formatted comments. An anchor `A` is delimeted by:
-```lean
--- ANCHOR: A
-```
-and:
-```lean
--- ANCHOR_END: A
-```
-
-Within a Lean source file, anchor names should be unique. Anchors may
-overlap arbitrarily.
-
-Within an anchor, a proof state may be named `X` using the
-`PROOF_STATE X` comment, which points at the source position of the
-state using a `^`. Here, the proof state `after_intro` is the one
-active around the `r`:
-
-```lean
-example : ∀n, n * (2 + 2) = n * 4 := by
-  -- ANCHOR: proof
-  intro n
-  -- ^ PROOF_STATE: after_intro
-  grind
-  -- ANCHOR_END: proof
-```
-
-### Module Extraction
-
-SubVerso can be used to extract a representation of a module's code
-together with metadata. Run:
-
-```
-$ subverso-extract-mod MODNAME OUT.json
-```
-
-to extract metadata about module `MODNAME` into `OUT.json`. The
-resulting JSON file contains an array of objects. Lean modules are
-sequences of commands, and each object represents one of them. The
-objects have the following keys:
- * `kind` - the syntax kind of the command
- * `defines` - names defined by the command (useful e.g. for automatic hyperlink insertion in rendered HTML)
- * `code` - the internal SubVerso JSON format for the highlighted
-   code, including proof states, which is intended to be deserialized
-   using the `FromJson Highlighted` instance from SubVerso.
-
-The `highlighted` facet for a package, library, or module builds
-highlighted sources.
+Versions of Lean prior to `4.25.0` or `nightly-2025-10-07` should use the `no-modules` branch.
 
 ### Helper Process
 
-SubVerso can also be used as a helper for other tools that need to be
-more interactive than module extraction, and yet still cross Lean
-version boundaries. Verso uses this feature to attempt to highlight
-code samples in Markdown module docstrings when using its "literate
-Lean" blog post feature.
+SubVerso can also be used as a helper for other tools that need to be more interactive than module extraction, and yet still cross Lean version boundaries. Verso uses this feature to attempt to highlight code samples in Markdown module docstrings when using its "literate Lean" blog post feature.
 
-To start up the helper, run `subverso-helper`. It communicates with a
-protocol reminiscent of JSON-RPC, but this is an implementation
-detail - it should be used via the API in `SubVerso.Helper`. It can
-presently be used to elaborate and highlight terms in the context of a
-module.
+To start up the helper, run `subverso-helper`. It communicates with a protocol reminiscent of JSON-RPC, but this is an implementation detail - it should be used via the API in `SubVerso.Helper`.
