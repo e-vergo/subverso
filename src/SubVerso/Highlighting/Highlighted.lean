@@ -75,7 +75,6 @@ inductive Token.Kind where
   | str (string : String)
   | option (name : Name) (declName : Name) (docs : Option String)
   | docComment
-  | lineComment
   | sort (doc? : Option String)
   | levelVar (name : Name)
   /-- A level operator, such as "+" or "imax" -/
@@ -114,7 +113,6 @@ instance : Quote Token.Kind where
     | .var (.mk n) type => mkCApp ``var #[mkCApp ``FVarId.mk #[quote n], quote type]
     | .str s => mkCApp ``str #[quote s]
     | .docComment => mkCApp ``docComment #[]
-    | .lineComment => mkCApp ``lineComment #[]
     | .sort doc? => mkCApp ``sort #[quote doc?]
     | .levelVar n => mkCApp ``levelVar #[quote n]
     | .levelConst v => mkCApp ``levelConst #[quote v]
