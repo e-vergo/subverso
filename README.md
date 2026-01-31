@@ -1,6 +1,6 @@
 # SubVerso (Side-by-Side Blueprint Fork)
 
-This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso) maintained for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) formalization documentation toolchain.
+This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen, maintained for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) formalization documentation toolchain.
 
 ## Overview
 
@@ -11,11 +11,11 @@ SubVerso extracts syntax highlighting and semantic information from Lean code du
 - Proof state visualization at tactic positions
 - Cross-reference linking between definition and usage sites
 
-This data is consumed by Verso documentation and the Side-by-Side Blueprint toolchain to render interactive Lean code displays with hovers, type information, and proof state views.
+This data is consumed by Verso documentation and the Side-by-Side Blueprint toolchain to render interactive Lean code displays.
 
 ## Fork Modifications
 
-This fork addresses performance bottlenecks discovered during blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of total build time. The modifications fall into three categories: indexed lookups, caching, and improved identifier resolution.
+This fork addresses performance and robustness issues discovered during blueprint artifact generation, where SubVerso highlighting accounts for 93-99% of total build time. The modifications fall into three categories: indexed lookups, caching, and improved identifier resolution.
 
 ### InfoTable Structure
 
@@ -80,13 +80,16 @@ This addresses cases where position-based matching fails due to macro expansion 
 The fork replaces panics with recoverable errors in critical paths:
 
 - `InfoTable.ofInfoTree`: Skips contextless nodes instead of panicking, processes children to find valid context
-- Netstring protocol: Uses `IO.userError` for EOF, length parsing, and message framing errors
-- Project loading: Validates lakefile/toolchain with proper error messages
+- `Split.lean`: Returns safe fallback instead of panicking on empty context stack
+- `highlightLevel`: Emits unknown token instead of panicking on unrecognized level syntax
+- `emitToken`: Handles synthetic source info from macros and term-mode proofs
 
 ## Dependency Chain
 
 ```
 SubVerso -> LeanArchitect -> Dress -> Runway
+              |
+              +-> Verso (genres use SubVerso for highlighting)
 ```
 
 SubVerso is the foundation of the Side-by-Side Blueprint toolchain. Changes here propagate to all downstream repositories.
@@ -175,6 +178,7 @@ def InfoTable.lookupByExactPos (table : InfoTable) (stx : Syntax) : Array (Conte
 def InfoTable.lookupTermInfoByName (table : InfoTable) (name : Name) : Array (ContextInfo × TermInfo)
 def InfoTable.lookupBySuffix (table : InfoTable) (suffix : String) : Array Name
 def InfoTable.lookupContaining (table : InfoTable) (stx : Syntax) : Array (ContextInfo × Info)
+def InfoTable.buildSuffixIndex (env : Environment) (table : InfoTable) : InfoTable
 ```
 
 ## Code Examples and Anchors
@@ -212,6 +216,23 @@ The output contains an array of command objects with:
 - `defines`: Names defined by the command
 - `code`: Highlighted code in SubVerso JSON format
 
+## Lake Facets
+
+This package provides Lake facets for build integration:
+
+| Facet | Level | Output |
+|-------|-------|--------|
+| `highlighted` | Module | JSON file with highlighted code |
+| `highlighted` | Library | Directory containing all module JSON files |
+| `highlighted` | Package | Directory containing all library outputs |
+| `examples` | Module | JSON file with extracted examples |
+| `examples` | Library | Directory containing all module examples |
+| `examples` | Package | Directory containing all library examples |
+
+## Helper Process
+
+SubVerso can run as a helper process for tools that need interactive highlighting across Lean version boundaries. Start with `subverso-helper`. Communication uses a netstring-based protocol (see `SubVerso.Helper`).
+
 ## Related Repositories
 
 **Upstream**:
@@ -224,6 +245,10 @@ The output contains an array of command objects with:
 
 **Parent project**:
 - [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) - Monorepo for the complete toolchain
+
+## Compatibility
+
+This fork tracks upstream releases and nightlies. The `Compat.lean` module provides compatibility shims for API differences across Lean versions.
 
 ## License
 
