@@ -1192,6 +1192,41 @@ def emitString (pos endPos : Compat.String.Pos) (string : String) : HighlightM U
 def emitString' (string : String) : HighlightM Unit :=
   modify fun st => {st with output := Output.addText st.output string}
 
+/-- Emit a string, detecting and tokenizing line comments.
+    Line comments start with `--` and extend to end of line.
+-/
+def emitStringWithLineComments (str : String) : HighlightM Unit := do
+  let endPos := Compat.String.endPos str
+  let mut pos : Compat.String.Pos := 0
+  let mut textStart : Compat.String.Pos := 0
+  while !Compat.String.atEnd str pos do
+    let c := Compat.String.Pos.get str pos
+    let nextPos := Compat.String.Pos.next str pos
+    -- Check for "--" at current position
+    if c == '-' && !Compat.String.atEnd str nextPos && Compat.String.Pos.get str nextPos == '-' then
+      -- Emit any text before the comment
+      if pos > textStart then
+        emitString' (Compat.String.Pos.extract str textStart pos)
+      -- Find end of line comment (newline or end of string)
+      let commentStart := pos
+      pos := Compat.String.Pos.next str nextPos  -- Skip past "--"
+      while !Compat.String.atEnd str pos && Compat.String.Pos.get str pos != '\n' do
+        pos := Compat.String.Pos.next str pos
+      -- Extract comment content (from "--" up to but not including newline)
+      let commentContent := Compat.String.Pos.extract str commentStart pos
+      -- Emit the comment as a lineComment token
+      modify fun st => {st with output := Output.addToken st.output ⟨.lineComment, commentContent⟩}
+      -- If we stopped at a newline, emit it as text and move past it
+      if !Compat.String.atEnd str pos && Compat.String.Pos.get str pos == '\n' then
+        emitString' "\n"
+        pos := Compat.String.Pos.next str pos
+      textStart := pos
+    else
+      pos := nextPos
+  -- Emit any remaining text after the last comment
+  if textStart < endPos then
+    emitString' (Compat.String.Pos.extract str textStart endPos)
+
 def emitToken (blame : Syntax) (info : SourceInfo) (token : Token) : HighlightM Unit := do
   if (← read).includeUnparsed then
     if let some pos := blame.getPos? then
@@ -1200,11 +1235,11 @@ def emitToken (blame : Syntax) (info : SourceInfo) (token : Token) : HighlightM 
 
   match info with
   | .original leading pos trailing endPos =>
-    emitString' leading.toString
+    emitStringWithLineComments leading.toString
     openUntil <| text.toPosition pos
     modify fun st => {st with output := Output.addToken st.output token}
     closeUntil endPos
-    emitString' trailing.toString
+    emitStringWithLineComments trailing.toString
     let trailingPos := Internal.getTrailingOrTailPos? blame
     setLastPos trailingPos
   | .synthetic b e _ =>
