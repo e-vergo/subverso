@@ -1,6 +1,8 @@
 # SubVerso (Side-by-Side Blueprint Fork)
 
-This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen, maintained for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) formalization documentation toolchain.
+> **Attribution:** This is a fork of [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen. The original SubVerso is a support library for [Verso](https://github.com/leanprover/verso) documentation that extracts syntax highlighting and semantic information from Lean code.
+
+This fork is maintained for the [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) formalization documentation toolchain.
 
 ## Overview
 
@@ -32,6 +34,7 @@ structure InfoTable where
 
 | Field | Purpose | Complexity |
 |-------|---------|------------|
+| `tacticInfo` | Tactic info lookup by canonical syntax range | O(1) |
 | `infoByExactPos` | Info lookup by exact syntax position (start, end) | O(1) |
 | `termInfoByName` | TermInfo lookup for const/fvar expressions by name | O(1) |
 | `nameSuffixIndex` | Constant lookup by final name component (e.g., `"add"` finds `Nat.add`) | O(1) |
@@ -42,7 +45,7 @@ The table is built once per file via `InfoTable.ofInfoTrees`, then queried throu
 - `lookupByExactPos`: O(1) lookup by syntax position
 - `lookupTermInfoByName`: O(1) lookup for constants and free variables by name
 - `lookupBySuffix`: O(1) lookup for constants by their final name component
-- `lookupContaining`: Linear scan with early termination for containment queries
+- `lookupContaining`: Linear scan with early termination for containment queries (since array is sorted by start position, scan exits when start position exceeds query start)
 
 ### HighlightState Caches
 
@@ -79,10 +82,10 @@ This addresses cases where position-based matching fails due to macro expansion 
 
 The fork replaces panics with recoverable errors in critical paths:
 
-- `InfoTable.ofInfoTree`: Skips contextless nodes instead of panicking, processes children to find valid context
-- `Split.lean`: Returns safe fallback instead of panicking on empty context stack
+- `InfoTable.ofInfoTree`: Skips contextless nodes instead of panicking; processes children to find valid context
+- `SplitCtx.close` (Split.lean): Returns current unchanged as safe fallback instead of panicking on empty context stack
 - `highlightLevel`: Emits unknown token instead of panicking on unrecognized level syntax
-- `emitToken`: Handles synthetic source info from macros and term-mode proofs
+- `emitToken`: Handles synthetic source info from macros and term-mode proofs (no leading/trailing whitespace available)
 
 ## Dependency Chain
 
@@ -248,7 +251,12 @@ SubVerso can run as a helper process for tools that need interactive highlightin
 
 ## Compatibility
 
-This fork tracks upstream releases and nightlies. The `Compat.lean` module provides compatibility shims for API differences across Lean versions.
+This fork tracks upstream releases and nightlies. The `Compat.lean` module provides compatibility shims for API differences across Lean versions, including:
+
+- String position types (`String.Pos` vs `String.Pos.Raw`)
+- HashMap/HashSet implementations (`Std.HashMap` vs `Lean.HashMap`)
+- Environment extension registration (`asyncMode` parameter)
+- Various renamed functions across Lean versions
 
 ## License
 
@@ -256,9 +264,9 @@ Apache 2.0, following the original SubVerso license.
 
 ---
 
-## Original SubVerso Documentation
+## Upstream SubVerso Documentation
 
-*The following is preserved from the upstream project.*
+*The following is preserved from the original project for reference.*
 
 SubVerso is a support library that allows a [Verso](https://github.com/leanprover/verso) document to describe Lean code written in multiple versions of Lean. Verso itself may be tied to new Lean versions, because it makes use of new compiler features. This library will maintain broader compatibility with various Lean versions.
 
