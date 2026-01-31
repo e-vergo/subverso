@@ -174,7 +174,7 @@ partial def Token.Kind.priority : Token.Kind → Nat
   | .moduleName .. => 4
   | .keyword .. => 3
   | .levelConst .. | .levelVar .. | .levelOp .. => 4
-  | .docComment | .withType .. => 1
+  | .docComment | .lineComment | .withType .. => 1
   | .unknown => 0
 
 /-- Finds all info nodes whose canonical span matches the given syntax -/
