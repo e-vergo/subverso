@@ -69,12 +69,12 @@ structure HighlightState where
 
 ### Enhanced Identifier Resolution
 
-The `identKind` function uses a multi-stage fallback strategy to resolve identifiers that lack direct info tree matches:
+The `identKind'` function (optimized for `HighlightM`) uses a multi-stage fallback strategy to resolve identifiers that lack direct info tree matches:
 
-1. **Exact syntax match**: Look for info nodes with matching position
-2. **Enclosing info search**: Find info nodes whose range contains the identifier (handles tactic arguments)
-3. **Name-based search**: Search for TermInfo by identifier name regardless of position (handles macro expansion)
-4. **Environment lookup**: Look up the identifier directly in the environment (handles simp lemma arguments and raw name references)
+1. **O(1) exact position lookup**: Use `InfoTable.lookupByExactPos` for info nodes with matching position
+2. **Containment search**: Use `InfoTable.lookupContaining` to find info nodes whose range contains the identifier (handles tactic arguments)
+3. **O(1) name-based search**: Use `InfoTable.lookupTermInfoByName` to search for TermInfo by identifier name regardless of position (handles macro expansion)
+4. **Environment lookup**: Look up the identifier directly in the environment with suffix matching (handles simp lemma arguments and raw name references)
 
 This addresses cases where position-based matching fails due to macro expansion or tactic elaboration.
 
