@@ -1,23 +1,29 @@
 # SubVerso (Side-by-Side Blueprint Fork)
 
-Fork of [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen.
+**Upstream:** [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen
 
-## Fork Purpose
+**Parent project:** [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint)
 
-This fork addresses performance and robustness issues discovered during blueprint artifact generation, where **SubVerso highlighting accounts for 93-99% of total build time**. The modifications provide O(1) indexed lookups for info tree queries, enabling syntax highlighting to scale to large formalization projects like PNT+ (591 annotated declarations).
+## Why This Fork Exists
+
+SubVerso extracts semantic syntax highlighting from Lean info trees. In blueprint artifact generation, **highlighting accounts for 93-99% of total build time** (800-6500ms per declaration). The original implementation traverses info trees repeatedly, which becomes prohibitive at scale.
+
+This fork introduces O(1) indexed lookups, enabling projects like PNT+ (591 annotated declarations) to build in reasonable time.
 
 ## Key Modification: InfoTable
 
-The original SubVerso traverses the info tree repeatedly during highlighting. This fork introduces `InfoTable`, which pre-processes the tree once and provides O(1) lookups via HashMap indices:
+Pre-processes the info tree once into HashMap indices for O(1) queries:
 
 ```lean
 structure InfoTable where
-  tacticInfo       : HashMap Syntax.Range (Array (ContextInfo × TacticInfo))
   infoByExactPos   : HashMap (String.Pos × String.Pos) (Array (ContextInfo × Info))
   termInfoByName   : HashMap Name (Array (ContextInfo × TermInfo))
   nameSuffixIndex  : HashMap String (Array Name)
+  tacticInfo       : HashMap Syntax.Range (Array (ContextInfo × TacticInfo))
   allInfoSorted    : Array (String.Pos × String.Pos × ContextInfo × Info)
 ```
+
+### HashMap Indices
 
 | Field | Purpose | Complexity |
 |-------|---------|------------|
@@ -40,7 +46,7 @@ structure InfoTable where
 
 ### HighlightState Caches
 
-Memoization caches for expensive operations:
+Memoization caches for expensive repeated operations:
 
 | Cache | Purpose |
 |-------|---------|
@@ -57,9 +63,9 @@ Multi-stage fallback strategy in `identKind'` for identifiers lacking direct inf
 3. **O(1) name-based search** for macro expansion cases
 4. **Environment lookup with suffix matching** for simp lemma arguments
 
-### Error Handling
+### Robustness Fixes
 
-Replaces panics with recoverable errors:
+Replaces panics with recoverable errors for edge cases encountered in production:
 
 | Location | Change |
 |----------|--------|
@@ -68,15 +74,12 @@ Replaces panics with recoverable errors:
 | `highlightLevel` | Emits unknown token on unrecognized syntax |
 | `emitToken` | Handles synthetic source info from macros and term-mode proofs |
 
-## Installation
+## Files Modified
 
-```toml
-# lakefile.toml
-[[require]]
-name = "subverso"
-git = "https://github.com/e-vergo/subverso.git"
-rev = "main"
-```
+| File | Changes |
+|------|---------|
+| `src/SubVerso/Highlighting/Code.lean` | InfoTable structure, HashMap indices, query functions |
+| `src/SubVerso/Highlighting/Highlighted.lean` | Token.Kind, Highlighted types |
 
 ## Dependency Chain
 
@@ -88,19 +91,17 @@ SubVerso -> LeanArchitect -> Dress -> Runway
 
 SubVerso is the foundation of the Side-by-Side Blueprint toolchain. Changes here propagate to all downstream repositories.
 
-## Key Files
+## Installation
 
-| File | Purpose |
-|------|---------|
-| `src/SubVerso/Highlighting/Code.lean` | InfoTable structure and query functions |
-| `src/SubVerso/Highlighting/Highlighted.lean` | Token.Kind and Highlighted types |
+```toml
+# lakefile.toml
+[[require]]
+name = "subverso"
+git = "https://github.com/e-vergo/subverso.git"
+rev = "main"
+```
 
-## Related Repositories
-
-| Repository | Purpose |
-|------------|---------|
-| [leanprover/subverso](https://github.com/leanprover/subverso) | Upstream (David Thrane Christiansen) |
-| [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint) | Parent project |
+Note: Most projects depend on SubVerso transitively via Dress. Direct dependency is only needed for custom highlighting integration.
 
 ## License
 
