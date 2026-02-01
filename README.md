@@ -4,26 +4,17 @@
 
 **Parent project:** [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint)
 
-## Why This Fork Exists
+## Fork Purpose
 
 SubVerso extracts semantic syntax highlighting from Lean info trees. In blueprint artifact generation, **highlighting accounts for 93-99% of total build time** (800-6500ms per declaration). The original implementation traverses info trees repeatedly, which becomes prohibitive at scale.
 
-This fork introduces O(1) indexed lookups, enabling projects like PNT+ (591 annotated declarations) to build in reasonable time.
+This fork introduces O(1) indexed lookups via `InfoTable`, enabling projects like PNT+ (591 annotated declarations) to build in reasonable time.
 
-## Key Modification: InfoTable
+## SBS-Specific Modifications
+
+### InfoTable Structure
 
 Pre-processes the info tree once into HashMap indices for O(1) queries:
-
-```lean
-structure InfoTable where
-  infoByExactPos   : HashMap (String.Pos × String.Pos) (Array (ContextInfo × Info))
-  termInfoByName   : HashMap Name (Array (ContextInfo × TermInfo))
-  nameSuffixIndex  : HashMap String (Array Name)
-  tacticInfo       : HashMap Syntax.Range (Array (ContextInfo × TacticInfo))
-  allInfoSorted    : Array (String.Pos × String.Pos × ContextInfo × Info)
-```
-
-### HashMap Indices
 
 | Field | Purpose | Complexity |
 |-------|---------|------------|
@@ -42,8 +33,6 @@ structure InfoTable where
 | `lookupBySuffix` | O(1) | Lookup constants by final name component |
 | `lookupContaining` | O(n) | Containment queries with early termination |
 
-## Additional Optimizations
-
 ### HighlightState Caches
 
 Memoization caches for expensive repeated operations:
@@ -52,7 +41,7 @@ Memoization caches for expensive repeated operations:
 |-------|---------|
 | `identKindCache` | Identifier classification by (position, name) |
 | `signatureCache` | Pretty-printed type signatures by constant name |
-| `hasTacticCache` / `childHasTacticCache` | Tactic info presence |
+| `hasTacticCache` | Tactic info presence |
 
 ### Identifier Resolution
 
@@ -78,7 +67,7 @@ Replaces panics with recoverable errors for edge cases encountered in production
 
 | File | Changes |
 |------|---------|
-| `src/SubVerso/Highlighting/Code.lean` | InfoTable structure, HashMap indices, query functions |
+| `src/SubVerso/Highlighting/Code.lean` | InfoTable structure, HashMap indices, query functions, HighlightState caches |
 | `src/SubVerso/Highlighting/Highlighted.lean` | Token.Kind, Highlighted types |
 
 ## Dependency Chain
@@ -101,7 +90,11 @@ git = "https://github.com/e-vergo/subverso.git"
 rev = "main"
 ```
 
-Note: Most projects depend on SubVerso transitively via Dress. Direct dependency is only needed for custom highlighting integration.
+Most projects depend on SubVerso transitively via Dress. Direct dependency is only needed for custom highlighting integration.
+
+## Tooling
+
+For build commands, screenshot capture, compliance validation, and other CLI tooling, see the [Archive & Tooling Hub](../archive/README.md).
 
 ## License
 
