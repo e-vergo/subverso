@@ -95,7 +95,7 @@ Most projects depend on SubVerso transitively via Dress. Direct dependency is on
 
 ## Tooling
 
-For build commands, screenshot capture, compliance validation, and other CLI tooling, see the [Archive & Tooling Hub](../archive/README.md).
+For build commands, screenshot capture, compliance validation, and other CLI tooling, see the [Archive & Tooling Hub](../../dev/storage/README.md).
 
 ## License
 
