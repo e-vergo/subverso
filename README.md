@@ -41,7 +41,8 @@ Memoization caches for expensive repeated operations:
 |-------|---------|
 | `identKindCache` | Identifier classification by (position, name) |
 | `signatureCache` | Pretty-printed type signatures by constant name |
-| `hasTacticCache` | Tactic info presence |
+| `hasTacticCache` | Tactic info presence by syntax range |
+| `childHasTacticCache` | Child tactic info presence by syntax range |
 
 ### Identifier Resolution
 
