@@ -2,7 +2,7 @@
 
 **Upstream:** [leanprover/subverso](https://github.com/leanprover/subverso) by David Thrane Christiansen
 
-**Parent project:** [Side-by-Side Blueprint](https://github.com/e-vergo/Side-By-Side-Blueprint)
+**Parent project:** [Side-by-Side Blueprint](https://github.com/e-vergo/SLS-Strange-Loop-Station)
 
 ## Fork Purpose
 
