@@ -133,6 +133,17 @@ def InfoTable.buildSuffixIndex (env : Environment) (table : InfoTable) : InfoTab
 def InfoTable.lookupBySuffix (table : InfoTable) (suffix : String) : Array Name :=
   Compat.HashMap.get? table.nameSuffixIndex suffix |>.getD #[]
 
+/-- Build a standalone suffix index from environment constants.
+    Returns the raw HashMap for use as `prebuiltSuffixIndex?` parameter.
+    Call once per module to amortize the O(E) cost across declarations. -/
+def buildStandaloneSuffixIndex (env : Environment) : Compat.HashMap String (Array Name) :=
+  env.constants.fold (init := {}) fun acc fullName _ =>
+    match fullName with
+    | .str _ suffix =>
+      let existing := Compat.HashMap.get? acc suffix |>.getD #[]
+      acc.insert suffix (existing.push fullName)
+    | _ => acc
+
 /--
 Find info nodes whose range CONTAINS the given syntax.
 Uses linear scan of sorted array. For containment: info.start <= stx.start && info.end >= stx.end.
@@ -755,6 +766,23 @@ private def getInfoTrailingOrTailPos? (info : SourceInfo) : Option Compat.String
 @[inherit_doc getInfoTrailingOrTailPos?]
 def Internal.getTrailingOrTailPos? (stx : Syntax) : Option Compat.String.Pos :=
   getInfoTrailingOrTailPos? stx.getTailInfo
+
+/--
+Module-level cache that persists across declarations within the same module.
+This amortizes the cost of expression rendering and signature computation
+when multiple `@[blueprint]` declarations share the same types.
+
+Used by Dress's per-declaration capture pipeline to avoid redundant work.
+-/
+structure ModuleHighlightCache where
+  /-- Cached rendered terms (Expr → Highlighted), persisted across declarations -/
+  terms : Compat.HashMap Expr Highlighted := {}
+  /-- Cached pretty-printed terms (Expr → CodeWithInfos), persisted across declarations -/
+  ppTerms : Compat.HashMap Expr CodeWithInfos := {}
+  /-- Cached pretty-printed signatures by constant name, persisted across declarations -/
+  signatureCache : Compat.HashMap Name String := {}
+
+instance : Inhabited ModuleHighlightCache := ⟨{}, {}, {}⟩
 
 structure HighlightState where
   /-- Messages not yet displayed -/
@@ -1857,28 +1885,86 @@ override these.
 def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
     (trees : PersistentArray Lean.Elab.InfoTree)
     (suppressNamespaces : List Name := [])
-    (startPos? endPos? : Option Compat.String.Pos := none) : TermElabM Highlighted := do
+    (startPos? endPos? : Option Compat.String.Pos := none)
+    -- Pre-built suffix index to skip O(E) `buildSuffixIndex` per declaration.
+    -- When `none`, the suffix index is built from scratch.
+    (prebuiltSuffixIndex? : Option (Compat.HashMap String (Array Name)) := none)
+    -- Pre-built ModuleRefs + alias ids to skip `findModuleRefs` per declaration.
+    -- When `none`, computed from scratch.
+    (prebuiltIds? : Option (HashMap Lsp.RefIdent Lsp.RefIdent) := none)
+    -- Module-level expression/signature cache ref. When provided, caches persist
+    -- across declarations. The ref is read at start and written back at end.
+    (moduleCacheRef? : Option (IO.Ref ModuleHighlightCache) := none)
+    : TermElabM Highlighted := do
+  let sbsProfile := (← IO.getEnv "SBS_PROFILE") == some "1"
+  let profileStart ← IO.monoMsNow
+
   let trees := trees.toArray
 
-  let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees
-  let ids := build modrefs
+  -- Phase 1: ModuleRefs (skip if pre-built ids provided)
+  let p1Start ← IO.monoMsNow
+  let ids ← match prebuiltIds? with
+    | some ids => pure ids
+    | none =>
+      let modrefs := Lean.Server.findModuleRefs (← getFileMap) trees
+      pure (build modrefs)
+  let p1End ← IO.monoMsNow
 
   let startPos? := startPos? <|> stx.getPos?
   let endPos? := endPos? <|> Internal.getTrailingOrTailPos? stx
 
   let st ← HighlightState.ofMessages stx messages startPos? endPos?
 
-  let infoTable : InfoTable := InfoTable.ofInfoTrees trees
-  let infoTable := infoTable.buildSuffixIndex (← getEnv)
+  -- Seed HighlightState from module cache if available
+  let st ← match moduleCacheRef? with
+    | some ref => do
+      let cache ← ref.get
+      pure { st with
+        terms := cache.terms
+        ppTerms := cache.ppTerms
+        signatureCache := cache.signatureCache
+      }
+    | none => pure st
 
+  -- Phase 2: InfoTable (always built per-declaration from the declaration's own trees)
+  let p2Start ← IO.monoMsNow
+  let infoTable : InfoTable := InfoTable.ofInfoTrees trees
+  let p2End ← IO.monoMsNow
+
+  -- Phase 3: Suffix index (skip if pre-built)
+  let p3Start ← IO.monoMsNow
+  let infoTable ← match prebuiltSuffixIndex? with
+    | some idx => pure { infoTable with nameSuffixIndex := idx }
+    | none => pure (infoTable.buildSuffixIndex (← getEnv))
+  let p3End ← IO.monoMsNow
+
+  -- Phase 5: Main highlighting
+  let p5Start ← IO.monoMsNow
   let doHighlight : HighlightM Unit := do
     highlight' trees stx true
     if let some endPos := endPos? then
       fillMissingSourceUpTo endPos
 
-  let ((), {output := output, ..}) ← doHighlight.run ⟨ids, true, true, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run st
+  let ((), finalSt) ← doHighlight.run ⟨ids, true, true, sortSuppress suppressNamespaces⟩ |>.run infoTable |>.run st
+  let p5End ← IO.monoMsNow
 
-  pure <| .fromOutput output
+  -- Write back caches to module-level ref if available
+  if let some ref := moduleCacheRef? then
+    ref.set {
+      terms := finalSt.terms
+      ppTerms := finalSt.ppTerms
+      signatureCache := finalSt.signatureCache
+    }
+
+  if sbsProfile then
+    let totalMs := p5End - profileStart
+    IO.eprintln s!"[SBS-PROFILE] findModuleRefs: {p1End - p1Start}ms"
+    IO.eprintln s!"[SBS-PROFILE] InfoTable.ofInfoTrees: {p2End - p2Start}ms"
+    IO.eprintln s!"[SBS-PROFILE] buildSuffixIndex: {p3End - p3Start}ms"
+    IO.eprintln s!"[SBS-PROFILE] highlight_total: {p5End - p5Start}ms"
+    IO.eprintln s!"[SBS-PROFILE] total: {totalMs}ms"
+
+  pure <| .fromOutput finalSt.output
 
 /--
 Highlights a sequence of syntaxes, each with its own info tree. Typically used for highlighting a
