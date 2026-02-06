@@ -781,8 +781,40 @@ structure ModuleHighlightCache where
   ppTerms : Compat.HashMap Expr CodeWithInfos := {}
   /-- Cached pretty-printed signatures by constant name, persisted across declarations -/
   signatureCache : Compat.HashMap Name String := {}
+  /-- Cached highlighting results by declaration name, keyed for lazy reuse -/
+  highlightResults : Compat.HashMap Name Highlighted := {}
+  /-- Type hash per declaration for cache invalidation. If a declaration's type hash
+      changes between elaborations, its cached highlighting is stale. -/
+  typeHashes : Compat.HashMap Name UInt64 := {}
 
-instance : Inhabited ModuleHighlightCache := ⟨{}, {}, {}⟩
+instance : Inhabited ModuleHighlightCache := ⟨{}, {}, {}, {}, {}⟩
+
+/-- Result of a lazy highlighting attempt. -/
+inductive HighlightResult where
+  /-- Highlighting was retrieved from cache (type hash matched). -/
+  | cached (hl : Highlighted)
+  /-- Highlighting was freshly computed (cache miss or type hash mismatch). -/
+  | fresh (hl : Highlighted)
+  /-- Highlighting was skipped (e.g., no info trees or other precondition failure). -/
+  | skipped
+deriving Inhabited
+
+/-- Extract the `Highlighted` value from a `HighlightResult`, or `none` if skipped. -/
+def HighlightResult.toHighlighted? : HighlightResult → Option Highlighted
+  | .cached hl => some hl
+  | .fresh hl => some hl
+  | .skipped => none
+
+/-- Returns `true` if the result was served from cache. -/
+def HighlightResult.isCached : HighlightResult → Bool
+  | .cached _ => true
+  | _ => false
+
+/-- Compute a lightweight hash of a declaration's type expression.
+    Used for cache invalidation: if the type hash changes, the declaration
+    has been modified and cached highlighting is stale. -/
+def declTypeHash (env : Environment) (declName : Name) : Option UInt64 :=
+  env.find? declName |>.map fun ci => hash ci.type
 
 structure HighlightState where
   /-- Messages not yet displayed -/
@@ -1949,11 +1981,16 @@ def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
   let p5End ← IO.monoMsNow
 
   -- Write back caches to module-level ref if available
+  -- Preserve highlightResults and typeHashes from the existing cache (they are managed
+  -- at a higher level by lazyHighlightIncludingUnparsed, not by the HighlightState).
   if let some ref := moduleCacheRef? then
+    let prevCache ← ref.get
     ref.set {
       terms := finalSt.terms
       ppTerms := finalSt.ppTerms
       signatureCache := finalSt.signatureCache
+      highlightResults := prevCache.highlightResults
+      typeHashes := prevCache.typeHashes
     }
 
   if sbsProfile then
@@ -1965,6 +2002,63 @@ def highlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
     IO.eprintln s!"[SBS-PROFILE] total: {totalMs}ms"
 
   pure <| .fromOutput finalSt.output
+
+/--
+Lazy variant of `highlightIncludingUnparsed` that checks the module-level cache
+before performing full highlighting work.
+
+**Cache hit**: If `declName` is found in `moduleCacheRef?.highlightResults` and the
+declaration's type hash matches the stored hash, returns `HighlightResult.cached`.
+
+**Cache miss**: If the declaration is not cached or the type hash differs (indicating
+the declaration was modified), runs full `highlightIncludingUnparsed`, stores the
+result in the cache, and returns `HighlightResult.fresh`.
+
+**Skip**: Returns `HighlightResult.skipped` if no cache ref is provided or if
+highlighting fails.
+
+Requires `moduleCacheRef?` for caching. Without it, falls through to full highlighting.
+-/
+def lazyHighlightIncludingUnparsed (stx : Syntax) (messages : Array Message)
+    (trees : PersistentArray Lean.Elab.InfoTree)
+    (declName : Name)
+    (suppressNamespaces : List Name := [])
+    (startPos? endPos? : Option Compat.String.Pos := none)
+    (prebuiltSuffixIndex? : Option (Compat.HashMap String (Array Name)) := none)
+    (prebuiltIds? : Option (HashMap Lsp.RefIdent Lsp.RefIdent) := none)
+    (moduleCacheRef? : Option (IO.Ref ModuleHighlightCache) := none)
+    : TermElabM HighlightResult := do
+  if trees.toArray.isEmpty then
+    return .skipped
+  -- Check cache if available
+  if let some cacheRef := moduleCacheRef? then
+    let cache ← cacheRef.get
+    -- Compute current type hash for this declaration
+    let env ← getEnv
+    let currentHash? := declTypeHash env declName
+    -- Check if we have a cached result with matching type hash
+    if let some cachedHl := Compat.HashMap.get? cache.highlightResults declName then
+      if let some currentHash := currentHash? then
+        if let some storedHash := Compat.HashMap.get? cache.typeHashes declName then
+          if currentHash == storedHash then
+            return .cached cachedHl
+    -- Cache miss or hash mismatch: do full highlighting
+    let hl ← highlightIncludingUnparsed stx messages trees suppressNamespaces
+      startPos? endPos? prebuiltSuffixIndex? prebuiltIds? moduleCacheRef?
+    -- Store result and type hash in cache
+    let updatedCache ← cacheRef.get  -- re-read after highlightIncludingUnparsed may have updated it
+    cacheRef.set { updatedCache with
+      highlightResults := updatedCache.highlightResults.insert declName hl
+      typeHashes := match currentHash? with
+        | some h => updatedCache.typeHashes.insert declName h
+        | none => updatedCache.typeHashes
+    }
+    return .fresh hl
+  else
+    -- No cache ref: fall through to full highlighting
+    let hl ← highlightIncludingUnparsed stx messages trees suppressNamespaces
+      startPos? endPos? prebuiltSuffixIndex? prebuiltIds? none
+    return .fresh hl
 
 /--
 Highlights a sequence of syntaxes, each with its own info tree. Typically used for highlighting a
